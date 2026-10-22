@@ -21,7 +21,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from . import motivos
 
 Severidad = Literal["ok", "info", "aviso", "grave"]
 Comparador = Literal["exacta", "tokens", "numerica", "fecha", "conjunto"]
@@ -76,6 +78,12 @@ class ReglaDocumentos(Estricto):
         return 2 * ("*" not in self.eps) + ("*" not in self.servicios)
 
 
+class AjusteRegla(Estricto):
+    activa: bool = True
+    # None = la severidad que decide la regla (p. ej. la de la matriz de documentos).
+    severidad: Severidad | None = None
+
+
 class Config(Estricto):
     # Orden de preferencia para desempatar y para el valor final.
     # El RIPS (JSON) lo genera el sistema del hospital: es la fuente principal.
@@ -126,10 +134,6 @@ class Config(Estricto):
             documentos={"FEV": "grave", "HEV": "info", "PDE": "info", "RIPS": "info", "CUV": "info"},
         )
     ]
-    # Sin XML ni RIPS pero con la factura en PDF (p. ej. un PDF unificado): se valida con el
-    # PDF, pero no se puede verificar el CUFE ante la DIAN.
-    si_solo_pdf: Severidad = "aviso"
-
     # Códigos DIAN y CUV que aparecen en casi todas las facturas: info con contador.
     codigos_recurrentes: dict[str, Severidad] = {
         "FAJ43b": "info",
@@ -147,14 +151,10 @@ class Config(Estricto):
 
     tarifa: ReglasTarifa = ReglasTarifa()
 
-    # Si el valor de una línea difiere entre fuentes digitales.
-    lineas_si_codigo_falta: Severidad = "grave"
-    lineas_si_valor_difiere: Severidad = "grave"
-    lineas_si_cantidad_difiere: Severidad = "aviso"
-    lineas_si_fecha_fuera_periodo: Severidad = "aviso"
-
-    hc_si_tipo_consulta_difiere: Severidad = "aviso"
-    hc_si_fecha_fuera_periodo: Severidad = "aviso"
+    # Ajustes por código de motivo (base/motivos.py) sobre lo que define cada regla (reglas/):
+    # desactivarlo o fijar su severidad. Sin entrada, rige el valor por defecto de la regla.
+    # ``validador reglas listar`` muestra los códigos y sus severidades por defecto.
+    reglas: dict[str, AjusteRegla] = {}
 
     # Campos de los PDF digitales: "generica" (localizador por posiciones + diccionario de
     # etiquetas, sin plantillas) o "plantilla" (parsers específicos de este hospital).
@@ -167,14 +167,21 @@ class Config(Estricto):
     # su valor es la referencia aunque las fuentes digitales (del mismo sistema) digan otra cosa.
     fuente_autoridad: dict[str, str] = {"numero_autorizacion": "autorizacion_scan"}
     min_confianza_autoridad: float = 0.85
-    cups_no_en_autorizacion: Severidad = "aviso"
     # Solo el escaneo difiere, con lectura de un solo motor, y las digitales coinciden: casi
     # siempre es error de OCR. El plan decía "aviso"; se deja "info" para no llenar la revisión
     # de ruido. Si dos motores confirman la lectura distinta, es "aviso".
     si_ocr_incierto_difiere: Severidad = "info"
-    autorizacion_no_legible: Severidad = "aviso"
 
     db_url: str = "sqlite:///salidas/validador.db"
+
+    @field_validator("reglas")
+    @classmethod
+    def _codigos_de_reglas(cls, v: dict[str, AjusteRegla]) -> dict[str, AjusteRegla]:
+        for codigo in v:
+            motivos.validar(codigo)
+            if codigo.startswith("CAMPO."):
+                raise ValueError(f"{codigo}: los campos se ajustan en 'campos' (si_difiere, si_falta_en_todas)")
+        return v
 
     def regla_documentos(self, eps: str | None, servicios: set[str]) -> ReglaDocumentos | None:
         """La regla de documentos mínimos más específica que aplica a la factura."""

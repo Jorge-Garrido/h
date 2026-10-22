@@ -31,7 +31,8 @@ def evaluar_campo(campo: str, extraidos: list[CampoExtraido], cfg: Config) -> Re
 
     if not valores:
         return ResultadoCampo(
-            valor_final=None, resultado=regla.si_falta_en_todas, motivo="no encontrado en ninguna fuente", **base
+            valor_final=None, resultado=regla.si_falta_en_todas, motivo="no encontrado en ninguna fuente",
+            codigos=["CAMPO.NO_ENCONTRADO"], **base
         )
 
     patron = cfg.formatos.get(campo)
@@ -50,7 +51,8 @@ def evaluar_campo(campo: str, extraidos: list[CampoExtraido], cfg: Config) -> Re
         distintos = [f for f, v in valores.items() if f != autoridad and not iguales(regla.comparador, v, ref)]
         base_etapa = {"etapa_resolucion": ext_autoridad.etapa, "confianza": ext_autoridad.confianza}
         if not distintos:
-            return ResultadoCampo(valor_final=ref, resultado="ok", motivo="coincide con el documento de la EPS", **base, **base_etapa)
+            return ResultadoCampo(valor_final=ref, resultado="ok", motivo="coincide con el documento de la EPS",
+                                  codigos=["CAMPO.COINCIDE_AUTORIDAD"], **base, **base_etapa)
         distancia = min(
             (distancia_digitos(ref, valores[f]) for f in distintos if "," not in valores[f] and "," not in ref), default=None
         )
@@ -58,6 +60,7 @@ def evaluar_campo(campo: str, extraidos: list[CampoExtraido], cfg: Config) -> Re
             valor_final=ref,
             resultado=regla.si_difiere,
             motivo=f"el documento de la EPS dice {ref}; difiere: {', '.join(distintos)}",
+            codigos=["CAMPO.DIFIERE_AUTORIDAD"],
             documento_sospechoso=",".join(distintos),
             distancia=distancia,
             **base,
@@ -71,10 +74,12 @@ def evaluar_campo(campo: str, extraidos: list[CampoExtraido], cfg: Config) -> Re
                 valor_final=voto.valor_mayoria,
                 resultado="grave",
                 motivo=f"formato inválido en todas las fuentes ({', '.join(invalidos)})",
+                codigos=["CAMPO.FORMATO_INVALIDO"],
                 **base,
             )
+        codigo = "CAMPO.COINCIDE" if len(valores) > 1 else "CAMPO.UNA_FUENTE"
         motivo = "coincide en todas las fuentes" if len(valores) > 1 else "una sola fuente"
-        return ResultadoCampo(valor_final=voto.valor_mayoria, resultado="ok", motivo=motivo, **base)
+        return ResultadoCampo(valor_final=voto.valor_mayoria, resultado="ok", motivo=motivo, codigos=[codigo], **base)
 
     if voto.empate:
         final = _por_prioridad(validos or valores, cfg)
@@ -82,6 +87,7 @@ def evaluar_campo(campo: str, extraidos: list[CampoExtraido], cfg: Config) -> Re
             valor_final=final,
             resultado="grave" if regla.si_difiere == "grave" else regla.si_difiere,
             motivo="las fuentes discrepan sin mayoría; requiere revisión humana",
+            codigos=["CAMPO.SIN_MAYORIA"],
             **base,
         )
 
@@ -98,25 +104,31 @@ def evaluar_campo(campo: str, extraidos: list[CampoExtraido], cfg: Config) -> Re
         # confirman, el escaneo realmente dice otra cosa (aviso).
         confiable = all(confianza_ocr.get(f, 0) >= cfg.min_confianza_autoridad for f in sospechosos)
         resultado: Severidad = "aviso" if confiable else cfg.si_ocr_incierto_difiere
+        codigos = ["CAMPO.OCR_DIFIERE_CONFIRMADO" if confiable else "CAMPO.OCR_DIFIERE_INCIERTO"]
         motivo = (
             "el escaneo dice otro valor (confirmado por dos lecturas) y las fuentes digitales coinciden entre sí"
             if confiable else "el escaneo difiere pero las fuentes digitales coinciden (probable error de OCR)"
         )
     else:
         resultado = regla.si_difiere
+        codigos = ["CAMPO.DIFIERE_MAYORIA"]
         motivo = f"{', '.join(sospechosos)} difiere de la mayoría"
         if distancia is not None:
             motivo += f" (distancia {distancia})"
     if any(f in invalidos for f in sospechosos):
         resultado = "grave"
+        codigos.append("CAMPO.FORMATO_INVALIDO")
         motivo += "; formato inválido"
     if mayoria_invalida := [f for f in invalidos if f not in sospechosos]:
         resultado = "grave"
+        if "CAMPO.FORMATO_INVALIDO" not in codigos:
+            codigos.append("CAMPO.FORMATO_INVALIDO")
         motivo += f"; el valor de la mayoría tiene formato inválido ({', '.join(mayoria_invalida)})"
     return ResultadoCampo(
         valor_final=voto.valor_mayoria,
         resultado=resultado,
         motivo=motivo,
+        codigos=codigos,
         documento_sospechoso=",".join(sospechosos),
         distancia=distancia,
         **base,

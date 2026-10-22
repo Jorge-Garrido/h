@@ -6,9 +6,10 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .. import SCHEMA_VERSION, __version__
+from . import motivos
 from .config import Severidad
 
 Fuente = Literal[
@@ -98,10 +99,17 @@ class ResultadoCampo(BaseModel):
     valores_por_fuente: dict[str, str | None]
     resultado: Severidad
     motivo: str | None = None
+    # Códigos del catálogo (base/motivos.py): lo que se guarda y se cuenta, sin datos del paciente.
+    codigos: list[str] = Field(default_factory=list)
     etapa_resolucion: Etapa = "digital"
     documento_sospechoso: str | None = None
     distancia: int | None = None
     confianza: float = 1.0
+
+    @field_validator("codigos")
+    @classmethod
+    def _codigos_conocidos(cls, v: list[str]) -> list[str]:
+        return [motivos.validar(c) for c in v]
 
 
 class ResultadoTarifa(BaseModel):
@@ -125,16 +133,31 @@ class ResultadoLinea(BaseModel):
     tarifa: ResultadoTarifa | None = None
     resultado: Severidad
     motivos: list[str] = Field(default_factory=list)
+    codigos: list[str] = Field(default_factory=list)
     documento_sospechoso: str | None = None
+
+    @field_validator("codigos")
+    @classmethod
+    def _codigos_conocidos(cls, v: list[str]) -> list[str]:
+        return [motivos.validar(c) for c in v]
 
 
 class Hallazgo(BaseModel):
     """Verificación que no es un campo comparado (HC, documentos, códigos DIAN/CUV...)."""
 
     tipo: str
+    # Código del catálogo de motivos y referencia no sensible (campo, CUPS, prefijo, código DIAN).
+    codigo: str
+    ref: str | None = None
     resultado: Severidad
+    # Texto con el detalle (puede traer valores): solo para el JSON y los reportes de revisión.
     motivo: str
     documento_sospechoso: str | None = None
+
+    @field_validator("codigo")
+    @classmethod
+    def _codigo_conocido(cls, v: str) -> str:
+        return motivos.validar(v)
 
 
 class PropuestaCorreccion(BaseModel):

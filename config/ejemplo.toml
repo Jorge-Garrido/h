@@ -25,6 +25,14 @@ nombre = "EPS sin RIPS en el paquete"  # NIT ficticio: reemplazar por el de la E
 eps = ["900000002"]
 documentos = { FEV = "grave", HEV = "grave", PDE = "grave", RIPS = "info", CUV = "info" }
 
+# --- Ajustes por código de motivo (ver: validador reglas listar) ----------------------------
+# Desactivar un código o fijar su severidad, sin tocar código. Las comillas son necesarias por el punto.
+[reglas."HC.ESPECIALIDAD_NO_VERIFICABLE"]
+activa = false
+
+[reglas."LINEA.CANTIDAD_DIFIERE"]
+severidad = "grave"
+
 # --- Códigos DIAN / CUV ------------------------------------------------------------------
 [codigos_recurrentes]
 FAJ43b = "info"

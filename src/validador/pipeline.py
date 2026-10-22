@@ -12,20 +12,15 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy.engine import Engine
 
-from .data_preprocessing import normalize
-from .attribution import votar
-from .base.config import Config, ReglaDocumentos, ResolutorConfig, Severidad
-from .corrections.adapter import proponer
-from .ingest import (
-    autorizacion_header, cuv, discover, factura_pdf_parser, generico, hc_parser, rips, unificado, xml_parser,
-)
+from . import reglas
+from .base.config import Config, ResolutorConfig
 from .base.schemas import (
     DocumentoExtraido,
     Hallazgo,
@@ -34,6 +29,20 @@ from .base.schemas import (
     ResultadoFactura,
     ResultadoLinea,
 )
+from .corrections.adapter import proponer
+from .data_preprocessing import normalize
+from .ingest import (
+    autorizacion_header,
+    cuv,
+    discover,
+    factura_pdf_parser,
+    generico,
+    hc_parser,
+    rips,
+    unificado,
+    xml_parser,
+)
+from .reglas.documentos import presente
 from .severity import evaluar_campo, peor
 from .store import db
 from .tarifario.matcher import Tarifario
@@ -41,13 +50,6 @@ from .tarifario.matcher import Tarifario
 log = logging.getLogger(__name__)
 
 FUENTES_LINEAS = ("rips", "xml", "pdf_factura")
-NOMBRE_DOCUMENTO = {
-    "HEV": "historia clínica",
-    "PDE": "autorización",
-    "FEV": "factura PDF",
-    "PDX": "resultados de apoyo diagnóstico",
-    "CUV": "respuesta de validación del Ministerio",
-}
 
 
 def esperados(docs: dict[str, DocumentoExtraido]) -> dict[str, set[str]]:
@@ -139,31 +141,9 @@ def _agrupar(lineas: list[LineaServicio]) -> dict[str, tuple[Decimal, Decimal]]:
     return {k: (v[0], v[1]) for k, v in total.items()}
 
 
-# Cuál resultado de tarifa representa a un código cuando tiene varias líneas: el más problemático.
-GRAVEDAD_TARIFA = {"valor_difiere": 0, "no_determinable": 1, "coincide": 2, "no_en_tarifario": 3, "sin_tarifario": 4}
-
-
-def _lineas_para_tarifa(docs: dict[str, DocumentoExtraido], codigo: str, principal: str) -> list[LineaServicio]:
-    """Líneas individuales del código para buscar su tarifa, de la fuente que trae la descripción
-    de cada una (XML, PDF) o, si ninguna la trae, de la fuente principal.
-
-    La tarifa se busca línea por línea y no sobre la suma: un mismo CUPS puede facturarse varias
-    veces con tarifas distintas (p. ej. 998702, sedación para resonancia y para tomografía), y el
-    promedio de las dos no corresponde a ningún ítem del tarifario."""
-    for fuente in ("xml", "pdf_factura", principal):
-        lineas = [l for l in docs[fuente].lineas if (l.codigo or "SIN_CODIGO") == codigo] if fuente in docs else []
-        if lineas and (fuente == principal or all(l.descripcion for l in lineas)):
-            return lineas
-    return []
-
-
-def comparar_lineas(
-    docs: dict[str, DocumentoExtraido],
-    principal: str,
-    tarifario: Tarifario | None,
-    cfg: Config,
-    periodo: tuple[date | None, date | None],
-) -> list[ResultadoLinea]:
+def comparar_lineas(ctx: reglas.Contexto) -> list[ResultadoLinea]:
+    """Agrupa los servicios por código en cada fuente y corre sobre cada uno las reglas de línea."""
+    docs = ctx.docs
     fuentes = [f for f in FUENTES_LINEAS if f in docs and docs[f].lineas]
     agrupado = {f: _agrupar(docs[f].lineas) for f in fuentes}
     descripciones: dict[str, str] = {}
@@ -176,212 +156,36 @@ def comparar_lineas(
                 tipos.setdefault(l.codigo, l.tipo_servicio)
 
     resultados: list[ResultadoLinea] = []
-    codigos = sorted({c for g in agrupado.values() for c in g})
-    for codigo in codigos:
-        cantidades = {f: agrupado[f][codigo][0] for f in fuentes if codigo in agrupado[f]}
-        valores = {f: agrupado[f][codigo][1] for f in fuentes if codigo in agrupado[f]}
-        motivos: list[str] = []
-        resultado: Severidad = "ok"
-        sospechoso: str | None = None
-
-        faltan = [f for f in fuentes if f not in valores]
-        if faltan:
-            voto = votar({f: ("si" if f in valores else "no") for f in fuentes}, "exacta")
-            sospechoso = ",".join(voto.sospechosos) or None
-            resultado = peor(resultado, cfg.lineas_si_codigo_falta)
-            motivos.append(f"el código no aparece en: {', '.join(faltan)}")
-        if len(set(valores.values())) > 1:
-            voto = votar({f: str(v) for f, v in valores.items()}, "numerica")
-            sospechoso = ",".join(voto.sospechosos) or sospechoso
-            resultado = peor(resultado, cfg.lineas_si_valor_difiere)
-            motivos.append("el valor difiere entre fuentes" + ("" if voto.sospechosos else " sin mayoría"))
-        if len(set(cantidades.values())) > 1:
-            resultado = peor(resultado, cfg.lineas_si_cantidad_difiere)
-            motivos.append("la cantidad difiere entre fuentes")
-
-        inicio, fin = periodo
-        if inicio and fin and "rips" in docs:
-            fuera = [
-                l.fecha for l in docs["rips"].lineas
-                if (l.codigo or "SIN_CODIGO") == codigo and l.fecha and not (inicio <= l.fecha <= fin)
-            ]
-            if fuera:
-                resultado = peor(resultado, cfg.lineas_si_fecha_fuera_periodo)
-                motivos.append("fecha de atención del RIPS fuera del periodo de la factura")
-
-        if "autorizacion_scan" in docs:
-            estado_cups = docs["autorizacion_scan"].extra.get(f"cups:{codigo}")
-            if estado_cups in ("no_legible", "diferencia"):
-                resultado = peor(resultado, cfg.cups_no_en_autorizacion)
-                listados = [c for c in (docs["autorizacion_scan"].extra.get("cups_escaneo") or "").split(",") if c]
-                detalle = f" (la autorización lista: {', '.join(listados[:5])})" if listados else ""
-                motivos.append(f"el CUPS facturado no está en la autorización escaneada{detalle}")
-
-        tarifa = None
-        for linea in _lineas_para_tarifa(docs, codigo, principal) if tarifario is not None else []:
-            if not linea.cantidad:
-                continue
-            unitario = linea.valor_total / linea.cantidad
-            t = tarifario.buscar(codigo, linea.descripcion or descripciones.get(codigo), unitario, cfg.tarifa)
-            motivo = None
-            if t.estado == "valor_difiere":
-                resultado = peor(resultado, cfg.tarifa.si_valor_difiere)
-                motivo = f"valor unitario {unitario} distinto a la tarifa {t.valor_unitario_tarifa} ({t.codigo_institucional})"
-            elif t.estado == "no_determinable":
-                resultado = peor(resultado, cfg.tarifa.si_no_determinable)
-                motivo = "tarifa no determinable: la descripción no corresponde a ningún ítem del tarifario"
-            elif t.estado == "no_en_tarifario":
-                resultado = peor(resultado, cfg.tarifa.si_no_en_tarifario)
-            if motivo and motivo not in motivos:
-                motivos.append(motivo)
-            if tarifa is None or GRAVEDAD_TARIFA[t.estado] < GRAVEDAD_TARIFA[tarifa.estado]:
-                tarifa = t
-
+    for codigo in sorted({c for g in agrupado.values() for c in g}):
+        linea = reglas.LineaComparada(
+            codigo=codigo,
+            fuentes=fuentes,
+            cantidades={f: agrupado[f][codigo][0] for f in fuentes if codigo in agrupado[f]},
+            valores={f: agrupado[f][codigo][1] for f in fuentes if codigo in agrupado[f]},
+            descripcion=descripciones.get(codigo),
+            tipo_servicio=tipos.get(codigo),
+        )
+        novedades = [n for _, n in reglas.ejecutar("linea", ctx, linea)]
         resultados.append(
             ResultadoLinea(
                 codigo=codigo,
-                tipo_servicio=tipos.get(codigo),
-                descripcion=descripciones.get(codigo),
-                cantidad_por_fuente=cantidades,
-                valor_por_fuente=valores,
-                tarifa=tarifa,
-                resultado=resultado,
-                motivos=motivos,
-                documento_sospechoso=sospechoso,
+                tipo_servicio=linea.tipo_servicio,
+                descripcion=linea.descripcion,
+                cantidad_por_fuente=linea.cantidades,
+                valor_por_fuente=linea.valores,
+                tarifa=linea.tarifa,
+                resultado=peor(*(n.severidad for n in novedades)),
+                motivos=list(dict.fromkeys(n.motivo for n in novedades if n.motivo)),
+                codigos=list(dict.fromkeys(n.codigo for n in novedades)),
+                # La última regla que señala un documento manda (el valor pesa más que la ausencia).
+                documento_sospechoso=next((n.sospechoso for n in reversed(novedades) if n.sospechoso), None),
             )
         )
     return resultados
 
 
-def _presente(cf: discover.CarpetaFactura, documento: str) -> bool:
-    if documento == "RIPS":
-        return cf.rips is not None
-    if documento == "CUV":
-        return cf.cuv is not None
-    return cf.pdf(documento) is not None
-
-
 def _servicios(docs: dict[str, DocumentoExtraido]) -> set[str]:
     return {l.tipo_servicio for l in docs["rips"].lineas if l.tipo_servicio} if "rips" in docs else set()
-
-
-def _hallazgos_documentos(
-    cf: discover.CarpetaFactura, docs: dict[str, DocumentoExtraido], cfg: Config, regla: ReglaDocumentos | None
-) -> list[Hallazgo]:
-    h: list[Hallazgo] = []
-    exigidos = regla.documentos if regla else {}
-    if not cf.rips and not cf.xml and cf.pdf("FEV"):
-        origen = f" (tomada de {cf.etiquetas['FEV']})" if "FEV" in cf.etiquetas else ""
-        h.append(Hallazgo(
-            tipo="documentos", resultado=cfg.si_solo_pdf,
-            motivo=f"sin XML ni RIPS: se validó con el PDF de la factura{origen}; no se pudo verificar el CUFE ante la DIAN",
-        ))
-    elif not cf.rips and not cf.xml:
-        h.append(Hallazgo(tipo="documentos", resultado="grave", motivo="no hay RIPS ni XML de la factura"))
-    elif not cf.rips and "RIPS" in exigidos:
-        h.append(Hallazgo(tipo="documentos", resultado=exigidos["RIPS"], motivo="sin RIPS: se usó el XML como respaldo"))
-    elif not cf.xml:
-        h.append(Hallazgo(tipo="documentos", resultado="grave", motivo="falta el XML de la factura electrónica"))
-    for documento, severidad in exigidos.items():
-        if documento == "RIPS" or _presente(cf, documento):
-            continue  # el RIPS ya se reportó arriba junto con el XML
-        h.append(Hallazgo(
-            tipo="documentos", resultado=severidad,
-            motivo=f"falta {documento} ({NOMBRE_DOCUMENTO.get(documento, documento)}); regla '{regla.nombre}'",
-        ))
-    for fuente, doc in docs.items():
-        for e in doc.errores:
-            h.append(Hallazgo(tipo="extraccion", resultado="aviso", motivo=f"{fuente}: {e}", documento_sospechoso=fuente))
-    if "hc" in docs and docs["hc"].requiere_ocr:
-        h.append(Hallazgo(tipo="ocr", resultado="info", motivo="historia clínica escaneada: identidad pendiente de OCR"))
-    if "autorizacion_scan" in docs:
-        esc = docs["autorizacion_scan"]
-        for campo in ("numero_autorizacion", "paciente_id"):
-            if esc.extra.get(f"no_concluyente:{campo}") and campo == "numero_autorizacion":
-                h.append(Hallazgo(
-                    tipo="ocr", resultado=cfg.autorizacion_no_legible,
-                    motivo="autorización escaneada: lectura no concluyente del número (un solo motor); revisión humana",
-                    documento_sospechoso="autorizacion_scan",
-                ))
-            if esc.extra.get(f"no_legible:{campo}"):
-                h.append(Hallazgo(
-                    tipo="ocr", resultado=cfg.autorizacion_no_legible if campo == "numero_autorizacion" else "info",
-                    motivo=f"autorización escaneada: {campo.replace('_', ' ')} no legible (revisión humana)",
-                    documento_sospechoso="autorizacion_scan",
-                ))
-    elif "autorizacion_digital" in docs:
-        aut = docs["autorizacion_digital"]
-        detalle = "" if aut.extra.get("encabezado_digital") else " (sin encabezado digital)"
-        h.append(Hallazgo(tipo="ocr", resultado="info", motivo=f"autorización: número y CUPS pendientes de OCR{detalle}"))
-    return h
-
-
-def _hallazgos_codigos(docs: dict[str, DocumentoExtraido], cfg: Config) -> list[Hallazgo]:
-    h: list[Hallazgo] = []
-    if "xml" in docs:
-        x = docs["xml"]
-        codigo = x.extra.get("dian_codigo")
-        if codigo and codigo not in cfg.dian_codigos_aceptado:
-            h.append(Hallazgo(tipo="dian", resultado="grave", motivo=f"respuesta DIAN {codigo}: documento no validado", documento_sospechoso="xml"))
-        for c in x.codigos:
-            h.append(Hallazgo(tipo="dian", resultado=cfg.codigos_recurrentes.get(c.codigo, cfg.dian_codigo_desconocido), motivo=f"DIAN {c.codigo}: {c.descripcion or ''}".strip()))
-    if "cuv" in docs:
-        c = docs["cuv"]
-        if c.extra.get("result_state") is False:
-            h.append(Hallazgo(tipo="cuv", resultado="grave", motivo="validación del Ministerio rechazada (ResultState=false)", documento_sospechoso="rips"))
-        conteo = Counter((v.codigo, v.clase, v.descripcion) for v in c.codigos)
-        for (codigo, clase, descripcion), n in sorted(conteo.items()):
-            if clase in cfg.cuv_clases_rechazo:
-                sev: Severidad = "grave"
-            else:
-                sev = cfg.codigos_recurrentes.get(codigo, cfg.cuv_codigo_desconocido)
-            veces = f" (x{n})" if n > 1 else ""
-            h.append(Hallazgo(tipo="cuv", resultado=sev, motivo=f"CUV {clase} {codigo}{veces}: {descripcion or ''}".strip()))
-    return h
-
-
-def _tipo_consulta_esperado(codigo: str, descripcion: str | None) -> str | None:
-    d = normalize.texto(descripcion) or ""
-    if "PRIMERA VEZ" in d:
-        return "primera_vez"
-    if "CONTROL" in d or "SEGUIMIENTO" in d:
-        return "control"
-    # Estructura CUPS: 8902xx primera vez, 8903xx control o seguimiento.
-    if codigo.startswith("8902"):
-        return "primera_vez"
-    if codigo.startswith("8903"):
-        return "control"
-    return None
-
-
-def _hallazgos_hc(docs: dict[str, DocumentoExtraido], lineas: list[ResultadoLinea], periodo, cfg: Config) -> list[Hallazgo]:
-    """Contra la HC solo se valida identidad (en campos), fecha, especialidad y tipo de consulta."""
-    hc = docs.get("hc")
-    if hc is None or not hc.atenciones:
-        return []
-    h: list[Hallazgo] = []
-    inicio, fin = periodo
-    fechas = [a.fecha for a in hc.atenciones if a.fecha]
-    if inicio and fin and fechas and not any(inicio <= f <= fin for f in fechas):
-        h.append(Hallazgo(tipo="hc", resultado=cfg.hc_si_fecha_fuera_periodo, motivo="ninguna nota de la HC está dentro del periodo de la factura", documento_sospechoso="hc"))
-
-    tipos_hc = {a.tipo_consulta for a in hc.atenciones if a.tipo_consulta}
-    especialidades = {a.especialidad for a in hc.atenciones if a.especialidad}
-    for linea in lineas:
-        if linea.tipo_servicio != "consultas":
-            continue
-        esperado = _tipo_consulta_esperado(linea.codigo, linea.descripcion)
-        if esperado and tipos_hc and esperado not in tipos_hc:
-            h.append(Hallazgo(
-                tipo="hc",
-                resultado=cfg.hc_si_tipo_consulta_difiere,
-                motivo=f"consulta {linea.codigo} facturada como {esperado.replace('_', ' ')} y la HC registra {', '.join(sorted(tipos_hc)).replace('_', ' ')}",
-                documento_sospechoso="hc",
-            ))
-        desc = normalize.texto(linea.descripcion) or ""
-        if especialidades and desc and not any(re.search(rf"\b{re.escape(e)}\b", desc) for e in especialidades):
-            h.append(Hallazgo(tipo="hc", resultado="info", motivo=f"especialidad de la consulta {linea.codigo} no verificable contra la HC"))
-    return h
 
 
 def marcar_duplicados(r: ResultadoFactura, engine: Engine) -> None:
@@ -391,9 +195,11 @@ def marcar_duplicados(r: ResultadoFactura, engine: Engine) -> None:
     previos = db.previos_por_cufe(engine, r.cufe, r.corrida_id, r.factura)
     # Otra factura con el mismo CUFE, en una corrida anterior o en esta misma.
     for factura_previa in sorted({f for _, f in previos if f != r.factura}):
-        r.hallazgos.append(Hallazgo(tipo="duplicado", resultado="grave", motivo=f"CUFE ya registrado con la factura {factura_previa}"))
+        r.hallazgos.append(Hallazgo(tipo="duplicado", codigo="DUPLICADO.CUFE", ref=factura_previa, resultado="grave",
+                                  motivo=f"CUFE ya registrado con la factura {factura_previa}"))
     if corrida_previa := next((c for c, f in previos if f == r.factura), None):
-        r.hallazgos.append(Hallazgo(tipo="duplicado", resultado="info", motivo=f"factura ya procesada en la corrida {corrida_previa}"))
+        r.hallazgos.append(Hallazgo(tipo="duplicado", codigo="DUPLICADO.YA_PROCESADA", ref=corrida_previa, resultado="info",
+                                  motivo=f"factura ya procesada en la corrida {corrida_previa}"))
     r.estado = peor(r.estado, *(h.resultado for h in r.hallazgos))
 
 
@@ -413,7 +219,7 @@ def resultado_fallido(ruta: Path, corrida_id: str, error: Exception) -> Resultad
         campos=[],
         lineas=[],
         hallazgos=[Hallazgo(
-            tipo="procesamiento", resultado="grave",
+            tipo="procesamiento", codigo="PROCESAMIENTO.ERROR", ref=type(error).__name__, resultado="grave",
             motivo=f"la factura no se pudo procesar ({type(error).__name__}); revisar manualmente",
         )],
         dian={},
@@ -453,12 +259,11 @@ def procesar_carpeta(
     for campo in cfg.campos:
         extraidos = [d.campos[campo] for d in docs.values() if campo in d.campos]
         campos.append(evaluar_campo(campo, extraidos, cfg))
-    periodo = _periodo(campos)
-    lineas = comparar_lineas(docs, principal, tarifario, cfg, periodo)
-
     nit_eps = next((c.valor_final for c in campos if c.campo == "nit_eps"), None)
     regla = cfg.regla_documentos(nit_eps, _servicios(docs))
-    hallazgos = _hallazgos_documentos(cf, docs, cfg, regla) + _hallazgos_codigos(docs, cfg) + _hallazgos_hc(docs, lineas, periodo, cfg)
+    ctx = reglas.Contexto(cf, docs, cfg, tarifario, principal, _periodo(campos), regla)
+    lineas = ctx.lineas = comparar_lineas(ctx)
+    hallazgos = reglas.hallazgos(ctx)
 
     cufe = next((c.valor_final for c in campos if c.campo == "cufe"), None)
     estado = peor(*(c.resultado for c in campos), *(l.resultado for l in lineas), *(h.resultado for h in hallazgos))
@@ -472,7 +277,7 @@ def procesar_carpeta(
         estado=estado,
         fuente_principal=principal,
         documentos_presentes=cf.presentes(),
-        documentos_faltantes=[d for d in (regla.documentos if regla else {}) if not _presente(cf, d)],
+        documentos_faltantes=[d for d in (regla.documentos if regla else {}) if not presente(cf, d)],
         requiere_ocr=[f for f, d in docs.items() if d.requiere_ocr],
         campos=campos,
         lineas=lineas,

@@ -24,8 +24,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .. import __version__, pipeline, report, salida_errores, simulacion
+from .. import __version__, pipeline, reglas, report, salida_errores, simulacion
 from ..base.config import CLAVES_INFRA, ResolutorConfig, get_config
+from ..base.motivos import MOTIVOS
 from ..ingest import discover
 from ..store import db
 from ..tarifario import importer
@@ -211,6 +212,23 @@ def _config_simular(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reglas_listar(args: argparse.Namespace) -> int:
+    """Registro de reglas con sus códigos, severidad por defecto y el ajuste de la configuración activa."""
+    cfg = get_config()
+    for r in reglas.REGISTRO.values():
+        print(f"{r.id}  [{r.ambito}]  {r.descripcion}")
+        for codigo, defecto in r.severidades.items():
+            ajuste = cfg.reglas.get(codigo)
+            if ajuste is not None and not ajuste.activa:
+                efectivo = "-> desactivada"
+            elif ajuste is not None and ajuste.severidad:
+                efectivo = f"-> {ajuste.severidad}"
+            else:
+                efectivo = ""
+            print(f"    {codigo:34} {defecto or 'según el caso':14} {efectivo:16} {MOTIVOS[codigo]}")
+    return 0
+
+
 def _imprimir_discrepancias(resultados) -> None:
     filas = [(r.factura, d) for r in resultados for d in salida_errores.discrepancias(r)]
     if not filas:
@@ -252,6 +270,11 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--errores", default="CON ERROR", help="carpeta donde se copian las facturas con discrepancias (una subcarpeta por EPS)")
     pr.add_argument("--hospital", help="id del hospital: aplica sus capas de configuración publicadas")
     pr.set_defaults(func=_procesar)
+
+    rg = sub.add_parser("reglas", help="reglas de validación registradas").add_subparsers(dest="accion", required=True)
+    rg.add_parser("listar", help="códigos, severidad por defecto y ajustes de la configuración (VALIDADOR_CONFIG)").set_defaults(
+        func=_reglas_listar
+    )
 
     c = sub.add_parser("config", help="capas de configuración en la base de datos").add_subparsers(dest="accion", required=True)
     b = c.add_parser("borrador", help="valida un TOML con las claves que cambian y lo guarda como borrador")

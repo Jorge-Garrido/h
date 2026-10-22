@@ -205,7 +205,7 @@ def _explicar_linea(r: ResultadoFactura, l: ResultadoLinea) -> tuple[str, str, s
 def _explicar_hallazgo(r: ResultadoFactura, h: Hallazgo) -> tuple[str, str, str]:
     arch = _archivos(r)
     m = h.motivo
-    if h.tipo == "hc" and "facturada como" in m:
+    if h.codigo == "HC.TIPO_CONSULTA_DIFIERE":
         g = re.search(r"consulta (\d+) facturada como (.+?) y la HC registra (.+)", m)
         if g:
             return (
@@ -214,7 +214,7 @@ def _explicar_hallazgo(r: ResultadoFactura, h: Hallazgo) -> tuple[str, str, str]
                 f"{arch['HEV']}: \"Tipo de consulta\" | {arch['FEV']}: descripción del servicio",
                 "Confirmar el tipo de consulta con el área clínica y, si hace falta, corregir el código facturado.",
             )
-    if h.tipo == "hc":
+    if h.codigo == "HC.FECHA_FUERA_PERIODO":
         ingreso = next((c.valor_final for c in r.campos if c.campo == "fecha_ingreso"), "?")
         egreso = next((c.valor_final for c in r.campos if c.campo == "fecha_egreso"), "?")
         return (
@@ -231,14 +231,14 @@ def _explicar_hallazgo(r: ResultadoFactura, h: Hallazgo) -> tuple[str, str, str]
             f"{arch['PDE']}: \"No. Autorización\" (o \"CASO NRO.\")",
             "Si no coincide, gestionar con la EPS; si la imagen es ilegible, volver a escanear.",
         )
-    if h.tipo == "documentos" and m.startswith("sin XML ni RIPS"):
+    if h.codigo == "DOC.SOLO_PDF":
         return (
             "La carpeta no trae el XML de la factura electrónica ni el RIPS. Se validó comparando el PDF de la factura "
             "con la autorización y la historia clínica, pero no se pudo verificar el CUFE ni el RIPS.",
             f"Carpeta original: {', '.join(r.documentos_presentes.get('UNI', [])) or 'archivos PDF'}",
             "Adjuntar el XML (AttachedDocument) y, si la EPS lo exige, el RIPS con su CUV antes de radicar.",
         )
-    if h.tipo == "documentos":
+    if h.codigo == "DOC.FALTA":
         return (f"Falta un documento obligatorio: {m}.", "Carpeta original de la factura", "Completar los soportes antes de radicar.")
     return (m, "", "")
 

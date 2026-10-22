@@ -30,12 +30,12 @@ def test_la_capa_mas_especifica_gana():
     r = ResolutorConfig(BASE, [
         capa(1, tarifa={"tolerancia_pesos": 200}),
         capa(2, eps=NIT_EPS, tarifa={"tolerancia_pesos": 300}),
-        capa(3, hospital=HOSPITAL, tarifa={"tolerancia_pesos": 400}, si_solo_pdf="grave"),
+        capa(3, hospital=HOSPITAL, tarifa={"tolerancia_pesos": 400}, reglas={"DOC.SOLO_PDF": {"severidad": "grave"}}),
         capa(4, hospital=HOSPITAL, eps=NIT_EPS, tarifa={"tolerancia_pesos": 500}),
     ], HOSPITAL)
     resuelta = r.para(NIT_EPS, date(2026, 7, 31))
     assert resuelta.capas == (1, 2, 3, 4) and resuelta.cfg.tarifa.tolerancia_pesos == 500
-    assert resuelta.cfg.si_solo_pdf == "grave"  # la capa 3 aporta lo que la 4 no cambia
+    assert resuelta.cfg.reglas["DOC.SOLO_PDF"].severidad == "grave"  # la capa 3 aporta lo que la 4 no cambia
     assert resuelta.cfg.tarifa.score_minimo == BASE.tarifa.score_minimo  # la mezcla es por clave
     assert tolerancia(r, eps="111") == 400  # otra EPS: no aplican las capas 2 ni 4
 
@@ -65,7 +65,9 @@ def test_huella_identifica_la_configuracion_efectiva():
     "datos, error",
     [
         ({"tarifa": {"tolerancia_peso": 200}}, "tolerancia_peso"),  # clave mal escrita
-        ({"si_solo_pdf": "gravisimo"}, "si_solo_pdf"),
+        ({"reglas": {"DOC.SOLO_PDF": {"severidad": "gravisimo"}}}, "severidad"),
+        ({"reglas": {"DOC.INVENTADO": {"activa": False}}}, "desconocido"),
+        ({"reglas": {"CAMPO.COINCIDE": {"activa": False}}}, "campos"),
         ({"db_url": "sqlite:///otra.db"}, "infraestructura"),
     ],
 )
@@ -102,7 +104,7 @@ def test_pipeline_aplica_la_capa_y_registra_cual(tmp_path):
     assert con_capa.config_capas == [7] and con_capa.hospital_id == HOSPITAL
     assert con_capa.config_huella != sin_capa.config_huella
     cambios = simulacion.comparar([sin_capa], [con_capa])
-    assert cambios[0].despues == "grave" and "documentos: grave" in cambios[0].aparecen
+    assert cambios[0].despues == "grave" and "DOC.FALTA HEV: grave" in cambios[0].aparecen
 
 
 def test_cli_borrador_simular_publicar(tmp_path, monkeypatch, capsys):

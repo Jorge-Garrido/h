@@ -1,7 +1,7 @@
 """Simulación de una capa de configuración antes de publicarla.
 
 Se procesan las mismas facturas con la configuración vigente y con el borrador, y se
-reporta qué cambia. Solo se comparan tipos de hallazgo y severidades (campo, CUPS, tipo):
+reporta qué cambia. Solo se comparan códigos de motivo y severidades (campo, CUPS, código):
 nunca valores del paciente.
 """
 
@@ -24,9 +24,9 @@ class Cambio:
 
 def _items(r: ResultadoFactura) -> Counter[str]:
     c: Counter[str] = Counter()
-    c.update(f"campo {x.campo}: {x.resultado}" for x in r.campos if x.resultado != "ok")
-    c.update(f"línea {x.codigo}: {x.resultado}" for x in r.lineas if x.resultado != "ok")
-    c.update(f"{x.tipo}: {x.resultado}" for x in r.hallazgos if x.resultado != "ok")
+    c.update(f"campo {x.campo} {'+'.join(x.codigos)}: {x.resultado}" for x in r.campos if x.resultado != "ok")
+    c.update(f"línea {x.codigo} {'+'.join(x.codigos)}: {x.resultado}" for x in r.lineas if x.resultado != "ok")
+    c.update(f"{x.codigo}{f' {x.ref}' if x.ref else ''}: {x.resultado}" for x in r.hallazgos if x.resultado != "ok")
     return c
 
 
