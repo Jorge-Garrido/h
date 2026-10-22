@@ -1,0 +1,11 @@
+base/config.py
+
+Toca ir a revidsar respecto a las hojas que me pasaron para estar seguro que todos los campos se estan revisando. 
+
+Hay que mirar hasta que punto se puede manejar como generalizacion y si las reglas son reglas genericas entocnes como se va almacenando el codigo python y como se puede manejar para diferentes hospitales y EPS
+
+base/schemas.py
+
+Esto aplica tambien para config.py, pir ejemplo la variable Fuente no seria bueno sacarlo por ejemplo de una tabla de fuentes? para tener un software generalizable como por ejemplo lo maneja odoo
+
+Para generalizar que es mejor por ejemplo un campo que envuelva cosas como class atencion codigo validacion que sea generico para la generalizacion.

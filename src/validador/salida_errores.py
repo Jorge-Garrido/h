@@ -46,6 +46,7 @@ NOMBRE_HALLAZGO = {
     "duplicado": "Duplicado",
     "extraccion": "Lectura de documento",
     "ocr": "Autorización escaneada no legible",
+    "procesamiento": "Error al procesar la factura",
 }
 # (clave de fuente, encabezado de columna, dónde mirar)
 FUENTES = [

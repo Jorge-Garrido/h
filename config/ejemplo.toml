@@ -1,0 +1,32 @@
+# Ejemplo de configuración. Uso: VALIDADOR_CONFIG=config/ejemplo.toml validador procesar ...
+# Solo se escriben las claves que cambian; el resto toma los valores por defecto de base/config.py.
+# Las listas (como documentos_minimos) reemplazan completa la lista por defecto.
+# En TOML las claves simples van ANTES de cualquier [tabla]; después quedarían dentro de ella.
+
+# Todo código DIAN/CUV que no esté en [codigos_recurrentes] es aviso hasta que se clasifique.
+dian_codigo_desconocido = "aviso"
+cuv_codigo_desconocido = "aviso"
+
+# --- Documentos mínimos: se aplica la regla MÁS ESPECÍFICA que coincida ----------------------
+# eps: NIT de la EPS sin dígito de verificación. servicios: tipos del RIPS
+# (consultas, procedimientos, medicamentos, otrosServicios). Valores: severidad si falta.
+
+[[documentos_minimos]]
+nombre = "general"
+documentos = { FEV = "grave", RIPS = "grave", CUV = "grave", HEV = "grave", PDE = "grave" }
+
+[[documentos_minimos]]
+nombre = "apoyo diagnóstico"          # no trae HC; trae resultados (PDX)
+servicios = ["procedimientos"]
+documentos = { FEV = "grave", RIPS = "grave", CUV = "grave", PDX = "grave", PDE = "grave", HEV = "info" }
+
+[[documentos_minimos]]
+nombre = "EPS sin RIPS en el paquete"  # NIT ficticio: reemplazar por el de la EPS
+eps = ["900000002"]
+documentos = { FEV = "grave", HEV = "grave", PDE = "grave", RIPS = "info", CUV = "info" }
+
+# --- Códigos DIAN / CUV ------------------------------------------------------------------
+[codigos_recurrentes]
+FAJ43b = "info"
+RUT01 = "info"
+FED137 = "info"

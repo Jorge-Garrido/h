@@ -1,0 +1,20 @@
+# Ejemplo de capa de la base de datos: contrato de un hospital con una EPS (NITs ficticios).
+#   validador config borrador config/capa_ejemplo.toml --hospital 800000001 --eps 900000002 \
+#       --desde 2027-02-01 --comentario "contrato 2027"
+#   validador config simular <id> "carpeta/del/lote"      # qué facturas cambian
+#   validador config publicar <id>                        # o: validador config retirar <id>
+#
+# Mismas claves que config/ejemplo.toml, pero solo las que cambian para este ámbito. Los
+# diccionarios se mezclan clave por clave; las listas (documentos_minimos) se reemplazan completas.
+# Cada versión es completa para su ámbito: la versión nueva reemplaza a la anterior, no se suma.
+# db_url y ocr_cache_dir no se aceptan aquí (son de infraestructura).
+
+[tarifa]
+tolerancia_pesos = 500           # el contrato redondea a la centena superior
+
+[codigos_recurrentes]
+RVC019 = "info"                  # notificación del CUV que esta EPS siempre devuelve
+
+[[documentos_minimos]]
+nombre = "contrato 2027: autorización también en consultas"
+documentos = { FEV = "grave", HEV = "grave", PDE = "grave", RIPS = "info", CUV = "info" }

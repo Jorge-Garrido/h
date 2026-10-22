@@ -166,3 +166,7 @@ class ResultadoFactura(BaseModel):
     propuestas_correccion: list[PropuestaCorreccion] = Field(default_factory=list)
     tiempos_ms: dict[str, int]
     tarifario_version_id: int | None = None
+    # Con qué reglas se validó: hash de la configuración efectiva y capas de la BD que la formaron.
+    hospital_id: str | None = None
+    config_huella: str | None = None
+    config_capas: list[int] = Field(default_factory=list)

@@ -9,12 +9,15 @@ dependencies = [
     "pymupdf>=1.24",
     "openpyxl>=3.1",
     "sqlalchemy>=2.0",
+    # Imágenes de los PDF (separación de PDF unificados y OCR).
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 postgres = ["psycopg[binary]>=3.1"]
-ocr = ["rapidocr>=3.9", "onnxruntime>=1.20"]
+# opencv-python: el mismo paquete que instala rapidocr (no mezclar con opencv-python-headless).
+ocr = ["rapidocr>=3.9", "onnxruntime>=1.20", "opencv-python>=4.9"]
 
 [project.scripts]
 validador = "validador.execute.cli:main"
@@ -29,3 +32,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["datos_reales: pruebas que usan la carpeta nuevaeps/ local (se omiten si no existe)"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F: errores y nombres sin usar · I: orden de imports · B: errores comunes · UP: sintaxis moderna
+select = ["E", "F", "I", "B", "UP"]
+# E741: el código usa `l` para líneas de forma consistente.
+ignore = ["E741"]

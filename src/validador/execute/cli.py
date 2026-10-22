@@ -1,26 +1,31 @@
 """Línea de comandos.
 
     validador tarifario importar documentos/base_cups.xlsx --uvb-anio 2025
-    validador procesar "nuevaeps/NUEVA EPS EXITOSA" --salida salidas
+    validador procesar "nuevaeps/NUEVA EPS EXITOSA" --salida salidas --hospital 800000001
+    validador config borrador cambios.toml --hospital 800000001 --eps 900156264 --desde 2027-02-01
+    validador config simular 7 "nuevaeps/NUEVA EPS EXITOSA"
+    validador config publicar 7
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import logging
 import os
 import secrets
 import shutil
-import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import sys
-from datetime import datetime, timezone
+import time
+import tomllib
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .. import __version__, pipeline, report, salida_errores
-from ..base.config import get_config
+from .. import __version__, pipeline, report, salida_errores, simulacion
+from ..base.config import CLAVES_INFRA, ResolutorConfig, get_config
 from ..ingest import discover
 from ..store import db
 from ..tarifario import importer
@@ -47,31 +52,33 @@ def _importar_tarifario(args: argparse.Namespace) -> int:
 def _trabajo(carpeta, corrida_id, cfg, tarifario):
     try:
         return pipeline.procesar_carpeta(carpeta, corrida_id, cfg, tarifario, None)
-    except Exception as e:  # una factura rota no detiene la corrida
+    except Exception as e:  # una factura rota no detiene la corrida, pero queda en los reportes
         logging.getLogger(__name__).error("factura %s: error %s", carpeta.name, type(e).__name__)
-        return None
+        return pipeline.resultado_fallido(carpeta, corrida_id, e)
 
 
 def _procesar_todas(carpetas, corrida_id, cfg, tarifario, workers: int):
     """Procesa en paralelo por procesos (el OCR usa CPU). Cada proceso limita sus hilos."""
     if workers <= 1:
         for c in carpetas:
-            if (r := _trabajo(c, corrida_id, cfg, tarifario)) is not None:
-                yield r
+            yield _trabajo(c, corrida_id, cfg, tarifario)
         return
     os.environ["VALIDADOR_OCR_HILOS"] = str(max(1, (os.cpu_count() or 2) // workers))
     with ProcessPoolExecutor(max_workers=workers) as ex:
         futuros = [ex.submit(_trabajo, c, corrida_id, cfg, tarifario) for c in carpetas]
         for f in as_completed(futuros):
-            if (r := f.result()) is not None:
-                yield r
+            yield f.result()
+
+
+def _resolutor(engine, hospital_id: str | None, sin_ocr: bool = False, extra=()) -> ResolutorConfig:
+    capas = (db.capas_publicadas(engine, hospital_id) if engine is not None else []) + list(extra)
+    return ResolutorConfig(get_config(), capas, hospital_id, {"ocr_habilitado": False} if sin_ocr else None)
 
 
 def _procesar(args: argparse.Namespace) -> int:
-    cfg = get_config()
-    if args.sin_ocr:
-        cfg = cfg.model_copy(update={"ocr_habilitado": False})
-    engine = None if args.sin_db else db.conectar(cfg.db_url)
+    base = get_config()
+    engine = None if args.sin_db else db.conectar(base.db_url)
+    cfg = _resolutor(engine, args.hospital, args.sin_ocr)
     tarifario = db.cargar_tarifario(engine, args.tarifario) if engine is not None else None
     if tarifario is None:
         print("AVISO  sin tarifario cargado: no se validan tarifas (use 'validador tarifario importar').")
@@ -91,11 +98,15 @@ def _procesar(args: argparse.Namespace) -> int:
             pipeline.marcar_duplicados(r, engine)
             db.guardar_resultado(engine, r)
         resultados.append(r)
-        report.escribir_factura(r, salida)
+        # El JSON trae los valores de cada fuente (datos del paciente): solo se escribe si hay algo que
+        # revisar, salvo que se pida con --json-todas (depuración).
+        if args.json_todas or r.estado in ("aviso", "grave"):
+            report.escribir_factura(r, salida)
         print(f"\r  {i}/{len(carpetas)} facturas ({time.perf_counter() - t0:.0f} s)", end="", flush=True)
     print()
 
     resumen = report.resumen(corrida_id, resultados)
+    resumen["hospital_id"] = args.hospital
     salida.mkdir(parents=True, exist_ok=True)
     (salida / "resumen.json").write_text(json.dumps(resumen, ensure_ascii=False, indent=2), encoding="utf-8")
     report.escribir_casos(resultados, salida / "casos_con_posible_error.csv")
@@ -114,6 +125,89 @@ def _procesar(args: argparse.Namespace) -> int:
     print(f"Carpetas con error: {carpeta_eps}")
     print(f"Reporte Excel:      {reporte}")
     print(f"Detalle técnico:    {salida}")
+    return 0
+
+
+# --- capas de configuración ---------------------------------------------------
+
+
+def _fecha(texto: str | None) -> date | None:
+    return date.fromisoformat(texto) if texto else None
+
+
+def _config_borrador(args: argparse.Namespace) -> int:
+    base = get_config()
+    datos = tomllib.loads(Path(args.archivo).read_text(encoding="utf-8"))
+    try:
+        capa_id = db.guardar_borrador(
+            db.conectar(base.db_url), base, datos,
+            hospital_id=args.hospital, eps_nit=args.eps, vigente_desde=_fecha(args.desde), vigente_hasta=_fecha(args.hasta),
+            comentario=args.comentario, creado_por=args.autor,
+        )
+    except ValueError as e:  # incluye los errores de validación de Pydantic
+        print(f"Capa rechazada:\n{e}")
+        return 1
+    print(f"Borrador {capa_id} guardado. Simúlelo con 'validador config simular {capa_id} <carpeta>' antes de publicarlo.")
+    return 0
+
+
+def _config_estado(args: argparse.Namespace) -> int:
+    try:
+        db.cambiar_estado_capa(db.conectar(get_config().db_url), args.id, args.nuevo_estado)
+    except ValueError as e:
+        print(e)
+        return 1
+    print(f"Capa {args.id}: {args.nuevo_estado}")
+    return 0
+
+
+def _config_listar(args: argparse.Namespace) -> int:
+    for c in db.listar_capas(db.conectar(get_config().db_url), args.hospital):
+        ambito = f"hospital={c['hospital_id'] or '*'} eps={c['eps_nit'] or '*'}"
+        vigencia = f"{c['vigente_desde']} a {c['vigente_hasta'] or '...'}"
+        print(f"{c['id']:>4}  {c['estado']:9}  {ambito:38}  {vigencia:25}  {c['creado_por']:12}  {c['comentario'] or ''}")
+    return 0
+
+
+def _diferencias(base: dict, efectiva: dict, prefijo: str = "") -> dict:
+    out = {}
+    for k, v in efectiva.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            out |= _diferencias(base[k], v, f"{prefijo}{k}.")
+        elif base.get(k) != v:
+            out[f"{prefijo}{k}"] = v
+    return out
+
+
+def _config_ver(args: argparse.Namespace) -> int:
+    base = get_config()
+    r = _resolutor(db.conectar(base.db_url), args.hospital).para(args.eps, _fecha(args.fecha))
+    print(f"Capas aplicadas: {list(r.capas) or 'ninguna'} | huella {r.huella}")
+    excluir = set(CLAVES_INFRA)
+    cambios = _diferencias(base.model_dump(mode="json", exclude=excluir), r.cfg.model_dump(mode="json", exclude=excluir))
+    print(json.dumps(cambios, ensure_ascii=False, indent=2) if cambios else "Igual a la configuración base.")
+    return 0
+
+
+def _config_simular(args: argparse.Namespace) -> int:
+    base = get_config()
+    engine = db.conectar(base.db_url)
+    fila = db.capa(engine, args.id)
+    if fila is None or fila["estado"] != "borrador":
+        print(f"La capa {args.id} no existe o no es un borrador.")
+        return 1
+    hospital = fila["hospital_id"]
+    actual = _resolutor(engine, hospital, args.sin_ocr)
+    nuevo = _resolutor(engine, hospital, args.sin_ocr, extra=[db.a_capa(fila)])
+    carpetas = discover.carpetas_de_facturas(Path(args.ruta))[: args.limite]
+    tarifario = db.cargar_tarifario(engine)
+    # Sin base de datos en el procesamiento: la simulación no guarda resultados ni marca duplicados.
+    antes = list(_procesar_todas(carpetas, "simulacion", actual, tarifario, args.workers))
+    despues = list(_procesar_todas(carpetas, "simulacion", nuevo, tarifario, args.workers))
+    cambios = simulacion.comparar(antes, despues)
+    for c in cambios:
+        print(f"  {c.factura}  {c.antes} -> {c.despues}  +{c.aparecen}  -{c.desaparecen}")
+    print(json.dumps(simulacion.resumen(cambios, len(carpetas)), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -154,8 +248,40 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--sin-db", action="store_true", help="no usa la base de datos (sin tarifario ni duplicados)")
     pr.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) // 4), help="procesos en paralelo")
     pr.add_argument("--sin-ocr", action="store_true", help="no lee las autorizaciones escaneadas")
+    pr.add_argument("--json-todas", action="store_true", help="escribe el JSON de todas las facturas (por defecto solo aviso/grave)")
     pr.add_argument("--errores", default="CON ERROR", help="carpeta donde se copian las facturas con discrepancias (una subcarpeta por EPS)")
+    pr.add_argument("--hospital", help="id del hospital: aplica sus capas de configuración publicadas")
     pr.set_defaults(func=_procesar)
+
+    c = sub.add_parser("config", help="capas de configuración en la base de datos").add_subparsers(dest="accion", required=True)
+    b = c.add_parser("borrador", help="valida un TOML con las claves que cambian y lo guarda como borrador")
+    b.add_argument("archivo")
+    b.add_argument("--hospital", help="sin --hospital la capa es global")
+    b.add_argument("--eps", help="NIT de la EPS sin dígito de verificación")
+    b.add_argument("--desde", required=True, help="AAAA-MM-DD (fecha de emisión de la factura)")
+    b.add_argument("--hasta")
+    b.add_argument("--comentario")
+    b.add_argument("--autor", default=getpass.getuser())
+    b.set_defaults(func=_config_borrador)
+    for accion, estado in (("publicar", "publicada"), ("retirar", "retirada")):
+        e = c.add_parser(accion, help=f"marca la capa como {estado}")
+        e.add_argument("id", type=int)
+        e.set_defaults(func=_config_estado, nuevo_estado=estado)
+    ls = c.add_parser("listar", help="lista las capas (todas, o las que aplican a un hospital)")
+    ls.add_argument("--hospital")
+    ls.set_defaults(func=_config_listar)
+    v = c.add_parser("ver", help="configuración efectiva para un hospital, una EPS y una fecha")
+    v.add_argument("--hospital")
+    v.add_argument("--eps")
+    v.add_argument("--fecha", help="AAAA-MM-DD (por defecto hoy)")
+    v.set_defaults(func=_config_ver)
+    s = c.add_parser("simular", help="procesa facturas con y sin el borrador y muestra qué cambia")
+    s.add_argument("id", type=int)
+    s.add_argument("ruta")
+    s.add_argument("--limite", type=int)
+    s.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) // 4))
+    s.add_argument("--sin-ocr", action="store_true")
+    s.set_defaults(func=_config_simular)
 
     args = p.parse_args(argv)
     return args.func(args)

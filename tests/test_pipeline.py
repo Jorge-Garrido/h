@@ -1,9 +1,9 @@
 """Casos de regresión de la sección 9 del plan que se pueden cubrir sin OCR."""
 
 import pytest
-from fabrica import Caso, carpeta
+from fabrica import NIT_EPS, Caso, carpeta
 
-from validador.base.config import Config
+from validador.base.config import Config, ReglaDocumentos
 from validador.pipeline import procesar_carpeta
 from validador.base.schemas import CampoExtraido
 from validador.severity import evaluar_campo
@@ -13,7 +13,7 @@ from validador.store import db
 @pytest.fixture
 def cfg():
     # Las carpetas sintéticas no traen PDFs de factura.
-    return Config(documentos_obligatorios=[], documentos_esperados=[])
+    return Config(documentos_minimos=[ReglaDocumentos(nombre="pruebas", documentos={"RIPS": "info", "CUV": "info"})])
 
 
 def campo(resultado, nombre):
@@ -121,6 +121,27 @@ def test_duplicado_por_cufe(tmp_path, cfg):
     assert any(h.tipo == "duplicado" and h.resultado == "grave" for h in r.hallazgos)
 
 
+def test_duplicado_por_cufe_en_la_misma_corrida(tmp_path, cfg):
+    engine = db.conectar(f"sqlite:///{tmp_path / 'v.db'}")
+    db.iniciar_corrida(engine, "c1", "test")
+    primera = procesar_carpeta(carpeta(tmp_path / "a", Caso()), "c1", cfg, engine=engine)
+    db.guardar_resultado(engine, primera)
+    # Mismo CUFE (de la fábrica), otra factura, mismo lote.
+    r = procesar_carpeta(carpeta(tmp_path / "b", Caso(factura="FE0000002")), "c1", cfg, engine=engine)
+    assert any(h.tipo == "duplicado" and h.resultado == "grave" for h in r.hallazgos)
+    assert r.estado == "grave"
+
+
+def test_factura_que_falla_queda_en_los_reportes(tmp_path):
+    from validador.pipeline import resultado_fallido
+    from validador.salida_errores import discrepancias
+
+    r = resultado_fallido(tmp_path, "c1", ValueError("detalle con datos del paciente"))
+    assert r.estado == "grave" and r.factura == tmp_path.name
+    assert "ValueError" in r.hallazgos[0].motivo and "paciente" not in r.hallazgos[0].motivo
+    assert discrepancias(r)  # se copia a CON ERROR y sale en el Excel
+
+
 def test_resultado_serializa_a_json(tmp_path, cfg):
     r = procesar_carpeta(carpeta(tmp_path, Caso()), "c1", cfg)
     datos = r.model_dump(mode="json")
@@ -146,3 +167,43 @@ def test_pdf_unificado_se_separa_por_paginas(tmp_path):
     partes = unificado.separar(ruta, tmp_path / "sep")
     assert set(partes) == {"FEV", "PDE", "HEV"}
     assert partes["HEV"][1] == "FE0000009.pdf, págs. 3-4"
+
+
+def test_regla_de_documentos_mas_especifica():
+    general = ReglaDocumentos(nombre="general", documentos={"FEV": "grave"})
+    proc = ReglaDocumentos(nombre="procedimientos", servicios=["procedimientos"], documentos={"PDX": "grave"})
+    eps = ReglaDocumentos(nombre="eps", eps=[NIT_EPS], documentos={"HEV": "grave"})
+    eps_proc = ReglaDocumentos(nombre="eps+proc", eps=[NIT_EPS], servicios=["procedimientos"], documentos={})
+    cfg = Config(documentos_minimos=[general, proc, eps, eps_proc])
+    assert cfg.regla_documentos("111", {"consultas"}).nombre == "general"
+    assert cfg.regla_documentos("111", {"consultas", "procedimientos"}).nombre == "procedimientos"
+    assert cfg.regla_documentos(NIT_EPS, {"consultas"}).nombre == "eps"
+    assert cfg.regla_documentos(NIT_EPS, {"procedimientos"}).nombre == "eps+proc"
+    assert Config(documentos_minimos=[eps]).regla_documentos("111", set()) is None
+
+
+def test_documento_minimo_faltante_segun_la_eps(tmp_path):
+    cfg = Config(documentos_minimos=[ReglaDocumentos(nombre="exigente", eps=[NIT_EPS], documentos={"HEV": "grave"})])
+    r = procesar_carpeta(carpeta(tmp_path, Caso()), "c1", cfg)  # la carpeta no trae HEV
+    assert any(h.tipo == "documentos" and h.resultado == "grave" and "exigente" in h.motivo for h in r.hallazgos)
+    assert r.documentos_faltantes == ["HEV"]
+
+
+def test_tarifa_por_linea_con_el_mismo_cups_y_tarifas_distintas(tmp_path, cfg):
+    from decimal import Decimal
+
+    from validador.tarifario.importer import ItemTarifa
+    from validador.tarifario.matcher import Tarifario
+
+    items = [
+        ItemTarifa("anexo", "ACD015", "998702", "SEDACION PARA PROCEDIMIENTO DE RESONANCIA MAGNETICA", Decimal("49.14"), Decimal(595100), 1),
+        ItemTarifa("anexo", "ACD279", "998702", "SEDACION PARA PROCEDIMIENTO DE TOMOGRAFIA AXIAL COMPUTARIZADA", Decimal("39.22"), Decimal(475000), 2),
+    ]
+    caso = Caso(lineas=[
+        ("998702", "SEDACION PARA PROCEDIMIENTO DE RESONANCIA MAGNETICA", 1, 595100, "procedimientos", "998702"),
+        ("998702", "SEDACION PARA PROCEDIMIENTO DE TOMOGRAFIA AXIAL COMPUTARIZADA", 1, 475000, "procedimientos", "998702"),
+    ])
+    r = procesar_carpeta(carpeta(tmp_path, caso), "c1", cfg, Tarifario(items))
+    linea = next(l for l in r.lineas if l.codigo == "998702")
+    # Sumadas darían un unitario de 535.050, que no es ninguna de las dos tarifas.
+    assert linea.tarifa.estado == "coincide", linea.motivos

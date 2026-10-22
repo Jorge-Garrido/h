@@ -7,8 +7,8 @@ import pytest
 from fabrica import NIT_IPS, Caso, carpeta
 
 from validador import localizar
-from validador.base.config import Config
-from validador.ocr import a_layout, imagenes, motor
+from validador.base.config import Config, ReglaDocumentos
+from validador.ocr import a_layout, imagenes, motor, tesseract
 from validador.pipeline import procesar_carpeta
 
 pytest.importorskip("rapidocr")
@@ -64,7 +64,10 @@ LINEA_EMG = [("39143", "930860 ELECTROMIOGRAFIA", 1, 100000, "procedimientos", "
 
 
 def _cfg(tmp_path):
-    return Config(documentos_obligatorios=[], documentos_esperados=[], ocr_cache_dir=str(tmp_path / "cache"))
+    return Config(
+        documentos_minimos=[ReglaDocumentos(nombre="pruebas", documentos={"RIPS": "info", "CUV": "info"})],
+        ocr_cache_dir=str(tmp_path / "cache"),
+    )
 
 
 def _con_pde(tmp_path, caso, **kw):
@@ -88,6 +91,8 @@ def test_pipeline_escaneo_confirma_xml_y_senala_rips(tmp_path):
     assert "autorización escaneada" not in " ".join(linea.motivos)  # el CUPS sí está en el escaneo
 
 
+# Con un solo motor la confianza no alcanza min_confianza_autoridad: hace falta la segunda lectura.
+@pytest.mark.skipif(not tesseract.disponible(), reason="requiere Tesseract (apt install tesseract-ocr)")
 def test_autoridad_del_documento_eps_cuando_xml_y_rips_coinciden_mal(tmp_path):
     # XML, nota, PDF y RIPS dicen lo mismo, pero la autorización de la EPS dice otro número.
     caso = Caso(autorizacion="3079522477", lineas=LINEA_EMG)
