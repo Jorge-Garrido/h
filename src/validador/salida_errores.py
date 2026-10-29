@@ -19,25 +19,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from . import catalogo
 from .explicar import explicar
 from .base.schemas import ResultadoFactura
 
 MARCA = ".generado_por_validador"
 
-NOMBRE_CAMPO = {
-    "numero_factura": "Número de factura",
-    "cufe": "CUFE",
-    "nit_emisor": "NIT emisor",
-    "nit_eps": "NIT EPS",
-    "paciente_id": "Documento del paciente",
-    "paciente_nombre": "Nombre del paciente",
-    "numero_autorizacion": "Número de autorización",
-    "id_interno_paciente": "Identificador interno",
-    "valor_total": "Valor total",
-    "fecha_ingreso": "Fecha de ingreso",
-    "fecha_egreso": "Fecha de egreso",
-    "fecha_emision": "Fecha de emisión",
-}
+_CAT = catalogo.get()
+NOMBRE_CAMPO = {n: c.nombre for n, c in _CAT.campos.items()}
 NOMBRE_HALLAZGO = {
     "hc": "Historia clínica",
     "documentos": "Documentos",
@@ -48,20 +37,23 @@ NOMBRE_HALLAZGO = {
     "ocr": "Autorización escaneada no legible",
     "procesamiento": "Error al procesar la factura",
     "regla": "Error en una regla de validación",
+    "plantilla": "Plantilla de validación",
 }
-# (clave de fuente, encabezado de columna, dónde mirar)
-FUENTES = [
-    ("rips", "RIPS (JSON)", "FE….json"),
-    ("xml", "XML factura", "FE….xml"),
-    ("xml_nota", "Nota del XML", "FE….xml, cbc:Note"),
-    ("pdf_factura", "PDF factura", "FEV/FVS"),
-    ("hc", "Historia clínica", "HEV"),
-    ("autorizacion_digital", "Encabezado de la autorización (hospital)", "PDE, encabezado"),
-    ("autorizacion_scan", "Autorización de la EPS (escaneada)", "PDE, imagen"),
-    ("cuv", "CUV", "FE…_CUV.json"),
-    ("carpeta", "Carpeta", "nombre de la carpeta"),
-]
-NOMBRE_FUENTE = {k: v for k, v, _ in FUENTES}
+# (clave de fuente, encabezado de columna, dónde mirar), en el orden del catálogo.
+FUENTES = [(n, f.nombre, f.archivo) for n, f in _CAT.fuentes.items()]
+
+
+def nombre_fuente(fuente: str) -> str:
+    """Encabezado de una fuente; las que no están en el catálogo ("doc_EPX") se muestran con su prefijo."""
+    return _CAT.fuente(fuente).nombre
+
+
+def _columnas(claves: set[str]) -> list[tuple[str, str, str]]:
+    """Columnas de fuentes para las claves usadas: las del catálogo en su orden y, al final, las demás."""
+    conocidas = [f for f in FUENTES if f[0] in claves]
+    return conocidas + [(k, nombre_fuente(k), _CAT.fuente(k).archivo) for k in sorted(claves - {f[0] for f in FUENTES})]
+
+
 
 
 # --- discrepancias -------------------------------------------------------------
@@ -124,11 +116,8 @@ def texto_revision(r: ResultadoFactura, filas: list[dict]) -> str:
         "",
     ]
     presentes = r.documentos_presentes
-    archivos = {
-        "rips": presentes.get("RIPS"), "xml": presentes.get("XML"), "xml_nota": presentes.get("XML"),
-        "pdf_factura": presentes.get("FEV"), "hc": presentes.get("HEV"), "autorizacion_digital": presentes.get("PDE"),
-        "autorizacion_scan": presentes.get("PDE"), "cuv": presentes.get("CUV"),
-    }
+    claves = {k for f in filas for k in f["valores"]}
+    archivos = {k: presentes.get(_CAT.fuente(k).documento or "") for k in claves}
     for f in filas:
         lineas.append(f"[{f['severidad'].upper()}] {f['campo']}")
         lineas.append(f"    QUÉ PASA:        {f['explicacion']}")
@@ -141,7 +130,7 @@ def texto_revision(r: ResultadoFactura, filas: list[dict]) -> str:
         for fuente, valor in f["valores"].items():
             marca = "   <-- SOSPECHOSO" if fuente in f["sospechosos"] else ""
             archivo = ", ".join(archivos.get(fuente) or [])
-            lineas.append(f"    {NOMBRE_FUENTE.get(fuente, fuente):36} {valor!s:34} {archivo}{marca}")
+            lineas.append(f"    {nombre_fuente(fuente):36} {valor!s:34} {archivo}{marca}")
         if f["valor_final"]:
             lineas.append(f"    {'VALOR DE REFERENCIA':36} {f['valor_final']}")
         lineas.append("")
@@ -253,7 +242,7 @@ def escribir_excel(resultados: list[ResultadoFactura], ruta: Path, eps: str, cor
 
     # Hoja 2: discrepancias con el valor de cada fuente
     ws = wb.create_sheet("Discrepancias")
-    usadas = [f for f in FUENTES if any(f[0] in d["valores"] for filas in todas.values() for d in filas)]
+    usadas = _columnas({k for filas in todas.values() for d in filas for k in d["valores"]})
     titulos = ["Factura", "Severidad", "Tipo", "Campo", "Qué pasa", "Cómo verificarlo", "Acción sugerida"] + [t for _, t, _ in usadas] + ["Valor de referencia", "Documento sospechoso"]
     _encabezado(ws, 1, titulos)
     fila = 2
@@ -282,7 +271,7 @@ def escribir_excel(resultados: list[ResultadoFactura], ruta: Path, eps: str, cor
                 c.fill = PatternFill("solid", fgColor=VERDE)
         base = 8 + len(usadas)
         ws.cell(row=fila, column=base, value=d["valor_final"])
-        ws.cell(row=fila, column=base + 1, value=", ".join(NOMBRE_FUENTE.get(s, s) for s in d["sospechosos"]) or None)
+        ws.cell(row=fila, column=base + 1, value=", ".join(nombre_fuente(s) for s in d["sospechosos"]) or None)
         for j in range(1, len(titulos) + 1):
             celda = ws.cell(row=fila, column=j)
             celda.border = BORDE

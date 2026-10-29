@@ -11,29 +11,29 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
+from . import catalogo
 from .base.schemas import Hallazgo, ResultadoCampo, ResultadoFactura, ResultadoLinea
 
-DOC = {
-    "rips": "el RIPS",
-    "xml": "el XML de la factura electrónica",
-    "xml_nota": "la nota del XML",
-    "pdf_factura": "el PDF de la factura",
-    "hc": "la historia clínica",
-    "autorizacion_digital": "el encabezado de la autorización (lo pone el hospital al escanear)",
-    "autorizacion_scan": "la autorización de la EPS (documento escaneado)",
-    "cuv": "la respuesta del Ministerio (CUV)",
-    "carpeta": "el nombre de la carpeta",
-}
-DOC_CORTO = {
-    "rips": "RIPS", "xml": "XML", "xml_nota": "nota del XML", "pdf_factura": "PDF de la factura",
-    "hc": "historia clínica", "autorizacion_digital": "encabezado de la autorización",
-    "autorizacion_scan": "autorización de la EPS", "cuv": "CUV", "carpeta": "carpeta",
-}
-DOC_ART = {
-    "rips": "el RIPS", "xml": "el XML", "xml_nota": "la nota del XML", "pdf_factura": "el PDF de la factura",
-    "hc": "la historia clínica", "autorizacion_digital": "el encabezado de la autorización",
-    "autorizacion_scan": "la autorización de la EPS (escaneada)", "cuv": "el CUV", "carpeta": "la carpeta",
-}
+_CAT = catalogo.get()
+
+
+class _Nombres(dict):
+    """Nombre de una fuente para el texto ("la historia clínica"); las que no están en el
+    catálogo ("doc_EPX") se nombran con su prefijo."""
+
+    def __init__(self, atributo: str):
+        super().__init__()
+        self.atributo = atributo
+
+    def __missing__(self, fuente: str) -> str:
+        return getattr(_CAT.fuente(fuente), self.atributo)
+
+    def get(self, fuente: str, defecto=None) -> str:
+        return self[fuente]
+
+
+DOC_CORTO = _Nombres("corto")
+DOC_ART = _Nombres("articulo")
 
 
 def _quienes(fuentes: list[str]) -> tuple[str, str]:
@@ -50,35 +50,19 @@ def miles(valor) -> str:
         return str(valor)
 
 
-DONDE = {
-    ("numero_autorizacion", "rips"): "{RIPS}: buscar \"numAutorizacion\"",
-    ("numero_autorizacion", "xml"): "{FEV}: línea \"AUTORIZACIÓN:\"",
-    ("numero_autorizacion", "xml_nota"): "{FEV}: línea \"AUTORIZACIÓN:\"",
-    ("numero_autorizacion", "pdf_factura"): "{FEV}: línea \"AUTORIZACIÓN:\"",
-    ("numero_autorizacion", "autorizacion_scan"): "{PDE}: \"No. Autorización\" (o \"CASO NRO.\" en COOSALUD)",
-    ("paciente_id", "rips"): "{RIPS}: \"tipoDocumentoIdentificacion\" y \"numDocumentoIdentificacion\" dentro de \"usuarios\"",
-    ("paciente_id", "pdf_factura"): "{FEV}: línea \"ID:\"",
-    ("paciente_id", "hc"): "{HEV}: encabezado \"Tipo y número de identificación\"",
-    ("paciente_id", "autorizacion_digital"): "{PDE}: encabezado \"Identificación\"",
-    ("paciente_id", "autorizacion_scan"): "{PDE}: línea \"Afiliado\"",
-    ("paciente_nombre", "pdf_factura"): "{FEV}: línea \"PACIENTE:\"",
-    ("paciente_nombre", "hc"): "{HEV}: encabezado \"Paciente\"",
-    ("paciente_nombre", "autorizacion_digital"): "{PDE}: encabezado \"Paciente\"",
-}
-ACCION = {
-    "rips": "Corregir el RIPS en el sistema de origen y volver a validarlo ante el Ministerio (nuevo CUV).",
-    "xml": "La factura electrónica no se edita: evaluar nota crédito/débito o refacturar.",
-    "xml_nota": "La factura electrónica no se edita: evaluar nota crédito/débito o refacturar.",
-    "pdf_factura": "La factura electrónica no se edita: evaluar nota crédito/débito o refacturar.",
-    "hc": "Corregir en el sistema clínico con nota aclaratoria (no sobrescribir).",
-    "autorizacion_digital": "Corregir los datos del paciente en el gestor documental donde se escaneó la autorización.",
-    "autorizacion_scan": "Verificar la autorización con la EPS; si no corresponde, solicitar la autorización correcta.",
-}
+# "Dónde mirar" por (campo, fuente) y qué hacer si una fuente está mal: catálogo (donde, accion).
+DONDE = {(c, n): t for n, f in _CAT.fuentes.items() for c, t in f.donde.items()}
+ACCION = {n: f.accion for n, f in _CAT.fuentes.items() if f.accion}
+
+
+class _Archivos(dict):
+    def __missing__(self, prefijo: str) -> str:
+        return "(no está en la carpeta)"
 
 
 def _archivos(r: ResultadoFactura) -> dict[str, str]:
-    p = r.documentos_presentes
-    return {k: (p.get(k) or ["(no está en la carpeta)"])[0] for k in ("RIPS", "XML", "FEV", "HEV", "PDE", "CUV")}
+    """Primer archivo de cada documento presente, por prefijo; los ausentes, "(no está en la carpeta)"."""
+    return _Archivos({k: v[0] for k, v in r.documentos_presentes.items() if v})
 
 
 def _donde(r: ResultadoFactura, campo: str, fuentes: list[str]) -> str:
@@ -86,8 +70,8 @@ def _donde(r: ResultadoFactura, campo: str, fuentes: list[str]) -> str:
     pasos = []
     for f in fuentes:
         plantilla = DONDE.get((campo, f))
-        if plantilla and plantilla.format(**arch) not in pasos:
-            pasos.append(plantilla.format(**arch))
+        if plantilla and plantilla.format_map(arch) not in pasos:
+            pasos.append(plantilla.format_map(arch))
     return " | ".join(pasos)
 
 

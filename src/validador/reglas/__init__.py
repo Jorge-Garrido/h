@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Literal
 
 from ..base import motivos
 from ..base.config import Config, ReglaDocumentos, Severidad
-from ..base.schemas import DocumentoExtraido, Hallazgo, ResultadoLinea, ResultadoTarifa
+from ..base.schemas import DocumentoExtraido, Hallazgo, ResultadoCampo, ResultadoLinea, ResultadoTarifa
 
 if TYPE_CHECKING:
     from ..ingest.discover import CarpetaFactura
@@ -57,6 +57,11 @@ class Contexto:
     regla_documentos: ReglaDocumentos | None
     # Se llena después de evaluar las líneas: las reglas de factura pueden usarlas (p. ej. HC).
     lineas: list[ResultadoLinea] = field(default_factory=list)
+    # Campos ya comparados (valor final de cada uno).
+    campos: list[ResultadoCampo] = field(default_factory=list)
+
+    def valor_final(self, campo: str) -> str | None:
+        return next((c.valor_final for c in self.campos if c.campo == campo), None)
 
 
 @dataclass
@@ -150,4 +155,4 @@ def hallazgos(ctx: Contexto) -> list[Hallazgo]:
 
 
 # Registra las reglas. El orden de los módulos es el orden de los hallazgos en los reportes.
-from . import lineas, documentos, codigos, hc  # noqa: E402, F401, I001
+from . import lineas, documentos, codigos, hc, plantillas  # noqa: E402, F401, I001

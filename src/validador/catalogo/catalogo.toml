@@ -1,0 +1,263 @@
+# Catálogo de documentos, fuentes y campos.
+#
+# Describe QUÉ existe: qué documentos trae una carpeta, cómo se reconocen, qué campos aporta
+# cada uno y cómo se llaman en los reportes. Es igual para todos los hospitales y se cambia por
+# PR (queda en git, con su diff y sus pruebas).
+#
+# Lo que cambia por hospital o EPS (alias de prefijos, etiquetas extra, formatos de su sistema,
+# severidades) NO va aquí: va en la configuración (`documentos`, `reglas`, `plantillas`) por capas.
+#
+# Se valida al cargar (catalogo/__init__.py): un error aquí detiene el arranque, no una factura.
+
+# --- campos ------------------------------------------------------------------------------------
+# tipo: cómo se busca y normaliza el valor (codigo, documento, nombre, dinero, fecha).
+# etiquetas: sinónimos genéricos que anuncian el campo en un PDF, el más específico primero.
+# Las etiquetas de un formato o de un hospital se agregan delante de estas.
+
+[campos.numero_factura]
+nombre = "Número de factura"
+tipo = "codigo"
+etiquetas = ["FACTURA ELECTRONICA DE VENTA", "NUMERO DE FACTURA", "FACTURA", "NO"]
+
+[campos.cufe]
+nombre = "CUFE"
+tipo = "codigo"
+etiquetas = ["CUFE"]
+
+[campos.nit_emisor]
+nombre = "NIT emisor"
+tipo = "codigo"
+etiquetas = ["NIT"]
+
+[campos.nit_eps]
+nombre = "NIT EPS"
+tipo = "codigo"
+etiquetas = ["NIT/ID", "NIT"]
+
+[campos.paciente_id]
+nombre = "Documento del paciente"
+tipo = "documento"
+etiquetas = ["TIPO Y NUMERO DE IDENTIFICACION", "IDENTIFICACION", "DOCUMENTO DE IDENTIDAD", "CEDULA", "N° DOCUMENTO",
+             "NUMERO DE DOCUMENTO", "AFILIADO", "ID", "NOMBRE"]
+
+[campos.paciente_nombre]
+nombre = "Nombre del paciente"
+tipo = "nombre"
+etiquetas = ["NOMBRE DEL PACIENTE", "PACIENTE", "NOMBRES", "NOMBRE", "USUARIO", "AFILIADO"]
+
+[campos.numero_autorizacion]
+nombre = "Número de autorización"
+tipo = "codigo"
+etiquetas = ["NUMERO DE AUTORIZACION", "NO AUTORIZACION", "CONSULTAR AMBULATORIO", "AUTORIZACION", "AUT"]
+
+[campos.id_interno_paciente]
+nombre = "Identificador interno"
+tipo = "codigo"
+etiquetas = ["IDENTIFICADOR UNICO", "CONSECUTIVO INTERNO", "HISTORIA CLINICA"]
+
+[campos.valor_total]
+nombre = "Valor total"
+tipo = "dinero"
+etiquetas = ["TOTAL A PAGAR", "VALOR TOTAL", "TOTAL"]
+
+[campos.fecha_ingreso]
+nombre = "Fecha de ingreso"
+tipo = "fecha"
+etiquetas = ["FECHA DE INGRESO", "FECHA INGRESO"]
+
+[campos.fecha_egreso]
+nombre = "Fecha de egreso"
+tipo = "fecha"
+etiquetas = ["FECHA DE EGRESO", "FECHA EGRESO"]
+
+[campos.fecha_emision]
+nombre = "Fecha de emisión"
+tipo = "fecha"
+etiquetas = []
+
+[campos.cups]
+nombre = "Código CUPS"
+tipo = "codigo"
+etiquetas = ["CODIGO CUPS", "SERVICIOS AUTORIZADOS", "PROCEDIMIENTOS AUTORIZADOS", "CUPS", "CODIGO", "COD"]
+
+# --- fuentes -----------------------------------------------------------------------------------
+# Una fuente es un conjunto de valores que vota en la comparación de campos. Un documento puede
+# dar más de una (el XML da "xml" y "xml_nota"; la autorización, su encabezado y su escaneo).
+# documento: clave del documento en la carpeta (para mostrar el nombre del archivo).
+# ocr: sus valores vienen de una lectura de imagen (se tratan como posible ruido de lectura).
+# donde: plantilla "dónde mirar" por campo; {FEV}, {HEV}... se reemplazan por el archivo.
+
+[fuentes.rips]
+nombre = "RIPS (JSON)"
+corto = "RIPS"
+articulo = "el RIPS"
+documento = "RIPS"
+archivo = "FE….json"
+accion = "Corregir el RIPS en el sistema de origen y volver a validarlo ante el Ministerio (nuevo CUV)."
+correccion = "Corregir el RIPS en el sistema de origen y volver a validarlo ante el Ministerio (nuevo CUV)"
+donde.numero_autorizacion = '{RIPS}: buscar "numAutorizacion"'
+donde.paciente_id = '{RIPS}: "tipoDocumentoIdentificacion" y "numDocumentoIdentificacion" dentro de "usuarios"'
+
+[fuentes.xml]
+nombre = "XML factura"
+corto = "XML"
+articulo = "el XML"
+documento = "XML"
+archivo = "FE….xml"
+accion = "La factura electrónica no se edita: evaluar nota crédito/débito o refacturar."
+correccion = "El XML no se edita (CUFE validado por la DIAN): evaluar nota crédito/débito o refacturación"
+donde.numero_autorizacion = '{FEV}: línea "AUTORIZACIÓN:"'
+
+[fuentes.xml_nota]
+nombre = "Nota del XML"
+corto = "nota del XML"
+articulo = "la nota del XML"
+documento = "XML"
+archivo = "FE….xml, cbc:Note"
+accion = "La factura electrónica no se edita: evaluar nota crédito/débito o refacturar."
+correccion = "El XML no se edita (CUFE validado por la DIAN): evaluar nota crédito/débito o refacturación"
+donde.numero_autorizacion = '{FEV}: línea "AUTORIZACIÓN:"'
+
+[fuentes.pdf_factura]
+nombre = "PDF factura"
+corto = "PDF de la factura"
+articulo = "el PDF de la factura"
+documento = "FEV"
+archivo = "FEV/FVS"
+accion = "La factura electrónica no se edita: evaluar nota crédito/débito o refacturar."
+correccion = "Regenerar la representación gráfica desde el XML validado"
+donde.numero_autorizacion = '{FEV}: línea "AUTORIZACIÓN:"'
+donde.paciente_id = '{FEV}: línea "ID:"'
+donde.paciente_nombre = '{FEV}: línea "PACIENTE:"'
+
+[fuentes.hc]
+nombre = "Historia clínica"
+corto = "historia clínica"
+articulo = "la historia clínica"
+documento = "HEV"
+archivo = "HEV"
+accion = "Corregir en el sistema clínico con nota aclaratoria (no sobrescribir)."
+correccion = "Corregir en el sistema clínico con nota aclaratoria (no sobrescribir)"
+donde.paciente_id = '{HEV}: encabezado "Tipo y número de identificación"'
+donde.paciente_nombre = '{HEV}: encabezado "Paciente"'
+
+[fuentes.epicrisis]
+nombre = "Epicrisis"
+corto = "epicrisis"
+articulo = "la epicrisis"
+documento = "EPI"
+archivo = "EPI"
+accion = "Corregir en el sistema clínico con nota aclaratoria (no sobrescribir)."
+correccion = "Corregir en el sistema clínico con nota aclaratoria (no sobrescribir)"
+
+[fuentes.autorizacion_digital]
+nombre = "Encabezado de la autorización (hospital)"
+corto = "encabezado de la autorización"
+articulo = "el encabezado de la autorización"
+documento = "PDE"
+archivo = "PDE, encabezado"
+accion = "Corregir los datos del paciente en el gestor documental donde se escaneó la autorización."
+correccion = "Re-escanear o re-subir, corregir metadatos en el gestor documental o solicitar nueva autorización a la EPS"
+donde.paciente_id = '{PDE}: encabezado "Identificación"'
+donde.paciente_nombre = '{PDE}: encabezado "Paciente"'
+
+[fuentes.autorizacion_scan]
+nombre = "Autorización de la EPS (escaneada)"
+corto = "autorización de la EPS"
+articulo = "la autorización de la EPS (escaneada)"
+documento = "PDE"
+archivo = "PDE, imagen"
+ocr = true
+accion = "Verificar la autorización con la EPS; si no corresponde, solicitar la autorización correcta."
+correccion = "Re-escanear o re-subir, corregir metadatos en el gestor documental o solicitar nueva autorización a la EPS"
+donde.numero_autorizacion = '{PDE}: "No. Autorización" (o "CASO NRO." en COOSALUD)'
+donde.paciente_id = '{PDE}: línea "Afiliado"'
+
+[fuentes.cuv]
+nombre = "CUV"
+corto = "CUV"
+articulo = "el CUV"
+documento = "CUV"
+archivo = "FE…_CUV.json"
+
+[fuentes.carpeta]
+nombre = "Carpeta"
+corto = "carpeta"
+articulo = "la carpeta"
+archivo = "nombre de la carpeta"
+
+# --- documentos --------------------------------------------------------------------------------
+# Clave: prefijo del archivo (FEV_<NIT>_<FACTURA>.pdf) o RIPS/XML/CUV para los estructurados.
+# lector: cómo se lee (rips, xml, cuv, factura, hc, autorizacion, generico) o "ninguno" si solo
+#   importa que esté presente.
+# fuente: la fuente de valores que alimenta (debe existir arriba).
+# campos: los que se buscan con el localizador genérico. vota = false: se usan solo para verificar
+#   la identidad del paciente, no para decidir el valor final.
+# max_paginas: páginas a leer (el encabezado se repite en cada página: basta la primera).
+# clasificar: textos que reconocen una página de este documento por su contenido (PDF sin
+#   prefijo, prefijos raros). Gana el documento con más textos encontrados; ante empate, el que
+#   está antes en este archivo (la factura también dice "AUTORIZACIÓN:", por eso va primero; la
+#   epicrisis suele decir "historia clínica", por eso va antes de la HC).
+# formatos: variantes del mismo documento según el sistema que lo genera. `detectar` son textos
+#   que deben estar todos en la primera página; `etiquetas` se agregan a las del campo.
+
+[documentos.RIPS]
+nombre = "RIPS"
+lector = "rips"
+fuente = "rips"
+
+[documentos.XML]
+nombre = "XML de la factura electrónica"
+lector = "xml"
+fuente = "xml"
+
+[documentos.CUV]
+nombre = "respuesta de validación del Ministerio"
+lector = "cuv"
+fuente = "cuv"
+
+[documentos.FEV]
+nombre = "factura PDF"
+lector = "factura"
+fuente = "pdf_factura"
+alias = ["FVS"]  # COOSALUD
+campos = ["numero_factura", "cufe", "nit_emisor", "nit_eps", "paciente_id", "paciente_nombre",
+          "numero_autorizacion", "id_interno_paciente", "valor_total", "fecha_ingreso", "fecha_egreso"]
+clasificar = ["FACTURA ELECTRONICA DE VENTA", "CUFE"]
+
+[documentos.EPI]
+# Ejemplo de documento nuevo sin código propio: lo lee el localizador genérico.
+nombre = "epicrisis"
+lector = "generico"
+fuente = "epicrisis"
+campos = ["paciente_id", "paciente_nombre", "fecha_ingreso", "fecha_egreso"]
+max_paginas = 1
+clasificar = ["EPICRISIS", "RESUMEN DE EGRESO"]
+
+[documentos.HEV]
+nombre = "historia clínica"
+lector = "hc"
+fuente = "hc"
+campos = ["paciente_id", "paciente_nombre", "id_interno_paciente"]
+max_paginas = 1
+clasificar = ["HISTORIA CLINICA", "TIPO Y NUMERO DE IDENTIFICACION", "NOTAS MEDICAS"]
+
+[documentos.PDE]
+nombre = "autorización"
+lector = "autorizacion"
+fuente = "autorizacion_digital"
+campos = ["paciente_id", "paciente_nombre", "id_interno_paciente"]
+max_paginas = 1
+clasificar = ["AUTORIZACION", "AUTORIZADOS", "AMBULATORI", "PORTAL SALUD", "CASO NRO"]
+
+[documentos.PDX]
+nombre = "resultados de apoyo diagnóstico"
+lector = "ninguno"
+
+[documentos.CRC]
+nombre = "comprobante de recibido del usuario"
+lector = "ninguno"
+
+[documentos.RAN]
+nombre = "registro de anestesia"
+lector = "ninguno"

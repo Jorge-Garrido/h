@@ -29,6 +29,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+validador = ["catalogo/*.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["datos_reales: pruebas que usan la carpeta nuevaeps/ local (se omiten si no existe)"]

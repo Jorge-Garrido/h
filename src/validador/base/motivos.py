@@ -38,6 +38,10 @@ MOTIVOS: dict[str, str] = {
     "DOC.SIN_RIPS": "sin RIPS: se usó el XML como respaldo",
     "DOC.SIN_XML": "falta el XML de la factura electrónica",
     "DOC.FALTA": "falta un documento exigido por la matriz de documentos",
+    "DOC.DESCONOCIDO": "un PDF no está en el catálogo y su contenido no se reconoció: solo se verificó la identidad",
+    "DOC.PREFIJO_INESPERADO": "el prefijo del archivo no está en el catálogo; el documento se reconoció por su contenido",
+    "DOC.CONTENIDO_NO_COINCIDE": "el contenido del PDF corresponde a otro documento que el que indica su prefijo",
+    "DOC.OTRO_PACIENTE": "un documento que solo verifica identidad parece ser de otro paciente",
     "EXTRACCION.ERROR": "no se pudo leer un documento",
     # --- OCR ---
     "OCR.HC_ESCANEADA": "historia clínica escaneada: identidad pendiente de OCR",
@@ -53,6 +57,9 @@ MOTIVOS: dict[str, str] = {
     "HC.FECHA_FUERA_PERIODO": "ninguna nota de la HC está dentro del periodo de la factura",
     "HC.TIPO_CONSULTA_DIFIERE": "el tipo de consulta facturado no coincide con la HC",
     "HC.ESPECIALIDAD_NO_VERIFICABLE": "la especialidad de la consulta no se pudo verificar contra la HC",
+    # --- plantillas de regla (Config.plantillas; ref = nombre de la plantilla) ---
+    "PLANTILLA.CAMPO_FALTA": "un campo exigido por una plantilla no se encontró en el documento",
+    "PLANTILLA.VALOR_NO_PERMITIDO": "el valor del campo no está entre los permitidos por una plantilla",
     # --- corrida ---
     "DUPLICADO.CUFE": "el CUFE ya está registrado con otra factura",
     "DUPLICADO.YA_PROCESADA": "la factura ya se procesó en otra corrida",

@@ -4,25 +4,24 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 
-from .. import SCHEMA_VERSION, __version__
+from .. import SCHEMA_VERSION, __version__, catalogo
 from . import motivos
 from .config import Severidad
 
-Fuente = Literal[
-    "rips",
-    "xml",
-    "xml_nota",
-    "cuv",
-    "pdf_factura",
-    "hc",
-    "autorizacion_digital",
-    "autorizacion_scan",
-    "carpeta",
-]
+
+def _fuente(v: str) -> str:
+    if not catalogo.fuente_valida(v):
+        raise ValueError(f"fuente desconocida: {v} (agregarla en catalogo/catalogo.toml)")
+    return v
+
+
+# Fuentes del catálogo (rips, xml, pdf_factura, hc, epicrisis...) o "doc_<PREFIJO>" para un PDF
+# que no está en el catálogo.
+Fuente = Annotated[str, AfterValidator(_fuente)]
 Etapa = Literal["digital", "paddle", "tesseract", "digitos", "llm", "humano"]
 
 
@@ -84,6 +83,9 @@ class DocumentoExtraido(BaseModel):
     paginas_sin_texto: list[int] = Field(default_factory=list)
     requiere_ocr: bool = False
     errores: list[str] = Field(default_factory=list)
+    # False: sus campos solo verifican la identidad del paciente, no deciden el valor final
+    # (documentos fuera del catálogo o tipos marcados vota = false).
+    vota: bool = True
 
     def poner(self, campo: str, valor: str | None, crudo: str | None = None, pagina: int | None = None) -> None:
         if valor is None or valor == "":

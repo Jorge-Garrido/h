@@ -19,7 +19,7 @@ from pathlib import Path
 
 from sqlalchemy.engine import Engine
 
-from . import reglas
+from . import catalogo, reglas
 from .base.config import Config, ResolutorConfig
 from .base.schemas import (
     DocumentoExtraido,
@@ -64,14 +64,68 @@ def esperados(docs: dict[str, DocumentoExtraido]) -> dict[str, set[str]]:
     return valores
 
 
-def extraer(cf: discover.CarpetaFactura, cfg: Config | None = None) -> dict[str, DocumentoExtraido]:
-    docs: dict[str, DocumentoExtraido] = {}
-    if cf.pdfs.get("UNI") and not cf.pdf("FEV"):
+# Lectores con código propio por documento (catálogo: ``lector``). Los demás PDF ("generico")
+# los lee solo el localizador genérico. RIPS, XML y CUV son formatos normativos: van aparte.
+LECTORES = {
+    "factura": factura_pdf_parser.extraer,
+    "hc": hc_parser.extraer,
+    "autorizacion": autorizacion_header.extraer,
+}
+
+
+def _separar_unificados(cf: discover.CarpetaFactura, cfg: Config | None) -> None:
+    """PDF sin prefijo: si no hay factura PDF, el primero se separa por páginas (todos los soportes
+    en un archivo); los demás se reconocen como un solo documento por su primera página."""
+    sueltos = list(cf.pdfs.get("UNI", []))
+    if sueltos and not cf.pdf("FEV"):
         destino = Path(cfg.ocr_cache_dir).parent / "unificados" if cfg else Path("salidas/unificados")
-        for prefijo, (ruta, etiqueta) in unificado.separar(cf.pdfs["UNI"][0], destino).items():
+        for prefijo, (ruta, etiqueta) in unificado.separar(sueltos.pop(0), destino).items():
             if not cf.pdf(prefijo):
                 cf.pdfs[prefijo] = [ruta]
                 cf.etiquetas[prefijo] = etiqueta
+    ocr = bool(cfg and cfg.ocr_habilitado)
+    for ruta in sueltos:
+        tipo = unificado.tipo_por_contenido(ruta, ocr)
+        if tipo is not None and not cf.pdf(tipo.prefijo):
+            cf.pdfs["UNI"].remove(ruta)
+            cf.pdfs[tipo.prefijo] = [ruta]
+            cf.reconocidos["UNI"] = tipo.prefijo
+        elif tipo is None:
+            cf.desconocidos.append("UNI")
+    if "UNI" in cf.pdfs and not cf.pdfs["UNI"]:
+        del cf.pdfs["UNI"]
+
+
+def _reconocer_por_contenido(cf: discover.CarpetaFactura, cfg: Config | None) -> None:
+    """Prefijos que no están en el catálogo: se reconoce el documento por su primera página
+    (con OCR si está habilitado). Prefijos del catálogo: se revisa, solo con el texto digital,
+    que el contenido no sea claramente de otro documento."""
+    cat = catalogo.get()
+    for prefijo in [p for p in cf.pdfs if p != "UNI"]:
+        tipo, ruta = cat.documento(prefijo), cf.pdfs[prefijo][0]
+        if prefijo in cf.etiquetas:
+            continue  # salió de un PDF unificado: ya se clasificó por contenido
+        if tipo is None:
+            encontrado = unificado.tipo_por_contenido(ruta, bool(cfg and cfg.ocr_habilitado))
+            if encontrado is None:
+                cf.desconocidos.append(prefijo)
+                continue
+            cf.reconocidos[prefijo] = encontrado.prefijo
+            if not cf.pdf(encontrado.prefijo):
+                cf.pdfs[encontrado.prefijo] = cf.pdfs.pop(prefijo)
+        elif tipo.clasificar:
+            texto = normalize.texto(unificado.texto_primera_pagina(ruta)) or ""
+            encontrado = cat.clasificar(texto)
+            if encontrado is not None and encontrado is not tipo and not any(p in texto for p in tipo.clasificar):
+                cf.contenido_distinto[prefijo] = encontrado.prefijo
+
+
+def extraer(cf: discover.CarpetaFactura, cfg: Config | None = None) -> dict[str, DocumentoExtraido]:
+    cat = catalogo.get()
+    ajustes = cfg.documentos if cfg else {}
+    _separar_unificados(cf, cfg)
+    _reconocer_por_contenido(cf, cfg)
+    docs: dict[str, DocumentoExtraido] = {}
     carpeta = DocumentoExtraido(fuente="carpeta", archivo=cf.ruta.name)
     carpeta.poner("numero_factura", normalize.codigo(cf.factura))
     docs["carpeta"] = carpeta
@@ -83,25 +137,34 @@ def extraer(cf: discover.CarpetaFactura, cfg: Config | None = None) -> dict[str,
         x, nota = xml_parser.extraer(cf.xml)
         docs["xml"] = x
         docs["xml_nota"] = nota
-    rutas = {}
-    if ruta := cf.pdf("FEV"):
-        docs["pdf_factura"] = factura_pdf_parser.extraer(ruta)
-        rutas["pdf_factura"] = ruta
-    if ruta := cf.pdf("HEV"):
-        docs["hc"] = hc_parser.extraer(ruta)
-        rutas["hc"] = ruta
-    if ruta := cf.pdf("PDE"):
-        docs["autorizacion_digital"] = autorizacion_header.extraer(ruta)
-        rutas["autorizacion_digital"] = ruta
-    if cfg is None or cfg.extraccion_pdf == "generica":
-        # Los parsers de plantilla solo aportan las líneas de la factura y las notas de la HC.
-        valores = esperados(docs)
-        if "pdf_factura" in rutas:
-            generico.completar(docs["pdf_factura"], rutas["pdf_factura"], valores)
-            valores = esperados(docs)  # sin RIPS/XML, ahora la referencia es el PDF de la factura
-        for fuente, ruta in rutas.items():
-            if fuente != "pdf_factura":
-                generico.completar(docs[fuente], ruta, valores)
+
+    # PDF del catálogo con su lector; los que no están en el catálogo se leen para verificar la
+    # identidad del paciente, sin votar.
+    pdfs: dict[str, tuple[Path, catalogo.TipoDocumento | None]] = {}
+    for prefijo, rutas in cf.pdfs.items():
+        tipo = cat.documento(prefijo)
+        if prefijo == "UNI" or (tipo is not None and tipo.lector == "ninguno"):
+            continue
+        fuente = tipo.fuente if tipo else catalogo.fuente_desconocida(prefijo)
+        leer = LECTORES.get(tipo.lector) if tipo else None
+        docs[fuente] = leer(rutas[0]) if leer else generico.leer(rutas[0], fuente)
+        docs[fuente].vota = tipo.vota if tipo else False
+        pdfs[fuente] = (rutas[0], tipo)
+
+    plantilla = cfg is not None and cfg.extraccion_pdf == "plantilla"
+    # Los lectores de plantilla solo aportan las líneas de la factura y las notas de la HC; los
+    # campos los pone el localizador genérico (en modo "plantilla", solo a los que no tienen lector).
+    pendientes = [f for f, (_, t) in pdfs.items() if not plantilla or t is None or t.lector not in LECTORES]
+    valores = esperados(docs)
+    if "pdf_factura" in pendientes:
+        ruta, tipo = pdfs["pdf_factura"]
+        generico.completar(docs["pdf_factura"], ruta, valores, tipo, ajustes.get(tipo.prefijo))
+        valores = esperados(docs)  # sin RIPS/XML, ahora la referencia es el PDF de la factura
+    for fuente in pendientes:
+        if fuente != "pdf_factura":
+            ruta, tipo = pdfs[fuente]
+            generico.completar(docs[fuente], ruta, valores, tipo, ajustes.get(tipo.prefijo) if tipo else None)
+
     if cfg is not None and cfg.ocr_habilitado and (ruta := cf.pdf("PDE")):
         # Import diferido: el OCR (OpenCV, RapidOCR) es un extra opcional; sin él, --sin-ocr funciona.
         from .ingest import autorizacion_ocr
@@ -232,7 +295,7 @@ def _clave_config(docs: dict[str, DocumentoExtraido], cfg: Config) -> tuple[str 
     """EPS y fecha de la factura: deciden qué capas de configuración aplican."""
 
     def valor(campo: str) -> str | None:
-        extraidos = [d.campos[campo] for d in docs.values() if campo in d.campos]
+        extraidos = [d.campos[campo] for d in docs.values() if d.vota and campo in d.campos]
         return evaluar_campo(campo, extraidos, cfg).valor_final if extraidos else None
 
     return valor("nit_eps"), normalize.fecha(valor("fecha_emision"))
@@ -247,9 +310,10 @@ def procesar_carpeta(
 ) -> ResultadoFactura:
     t0 = time.perf_counter()
     resolutor = cfg if isinstance(cfg, ResolutorConfig) else ResolutorConfig(cfg)
-    cf = discover.clasificar(ruta)
-    # La extracción (OCR, modo de los PDF) depende del hospital, no de la EPS: aún no se sabe cuál es.
-    docs = extraer(cf, resolutor.para(None, None).cfg)
+    # La extracción (alias de prefijos, formatos, OCR) depende del hospital, no de la EPS: aún no se sabe cuál es.
+    cfg_hospital = resolutor.para(None, None).cfg
+    cf = discover.clasificar(ruta, cfg_hospital.alias_documentos())
+    docs = extraer(cf, cfg_hospital)
     resuelta = resolutor.para(*_clave_config(docs, resolutor.base))
     cfg = resuelta.cfg
     t_digital = time.perf_counter()
@@ -257,11 +321,12 @@ def procesar_carpeta(
     principal = _fuente_principal(docs)
     campos: list[ResultadoCampo] = []
     for campo in cfg.campos:
-        extraidos = [d.campos[campo] for d in docs.values() if campo in d.campos]
+        # Solo votan los documentos del catálogo; los demás verifican identidad (reglas/documentos.py).
+        extraidos = [d.campos[campo] for d in docs.values() if d.vota and campo in d.campos]
         campos.append(evaluar_campo(campo, extraidos, cfg))
     nit_eps = next((c.valor_final for c in campos if c.campo == "nit_eps"), None)
     regla = cfg.regla_documentos(nit_eps, _servicios(docs))
-    ctx = reglas.Contexto(cf, docs, cfg, tarifario, principal, _periodo(campos), regla)
+    ctx = reglas.Contexto(cf, docs, cfg, tarifario, principal, _periodo(campos), regla, campos=campos)
     lineas = ctx.lineas = comparar_lineas(ctx)
     hallazgos = reglas.hallazgos(ctx)
 

@@ -10,17 +10,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from .. import catalogo
 from ..base.schemas import PropuestaCorreccion, ResultadoFactura
 
-ACCIONES = {
-    "xml": "El XML no se edita (CUFE validado por la DIAN): evaluar nota crédito/débito o refacturación",
-    "xml_nota": "El XML no se edita (CUFE validado por la DIAN): evaluar nota crédito/débito o refacturación",
-    "pdf_factura": "Regenerar la representación gráfica desde el XML validado",
-    "rips": "Corregir el RIPS en el sistema de origen y volver a validarlo ante el Ministerio (nuevo CUV)",
-    "hc": "Corregir en el sistema clínico con nota aclaratoria (no sobrescribir)",
-    "autorizacion_digital": "Re-escanear o re-subir, corregir metadatos en el gestor documental o solicitar nueva autorización a la EPS",
-    "autorizacion_scan": "Re-escanear o re-subir, corregir metadatos en el gestor documental o solicitar nueva autorización a la EPS",
-}
+# Acción propuesta por fuente: ``correccion`` en el catálogo (catalogo/catalogo.toml).
+ACCIONES = {n: f.correccion for n, f in catalogo.get().fuentes.items() if f.correccion}
 
 
 class CorrectionAdapter(Protocol):

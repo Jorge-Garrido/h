@@ -1,10 +1,13 @@
 """PDF unificado: todos los soportes de la factura en un solo archivo sin prefijo
 (p. ej. ``FE4070942.pdf`` con factura + autorización + historia clínica).
 
-Cada página se clasifica por su contenido y se arman PDF separados (FEV, HEV, PDE)
-para que el resto del pipeline los trate como documentos normales. Las páginas sin
-texto digital se clasifican con OCR; las que no se reconocen continúan el documento
-de la página anterior.
+Cada página se clasifica por su contenido (textos ``clasificar`` del catálogo) y se arman PDF
+separados (FEV, HEV, PDE...) para que el resto del pipeline los trate como documentos normales.
+Las páginas sin texto digital se clasifican con OCR; las que no se reconocen continúan el
+documento de la página anterior.
+
+``tipo_por_contenido`` usa lo mismo con la primera página para reconocer un PDF suelto con un
+prefijo raro o sin prefijo.
 """
 
 from __future__ import annotations
@@ -14,20 +17,14 @@ from pathlib import Path
 
 import pymupdf
 
-from ..data_preprocessing import normalize
+from .. import catalogo
+from ..catalogo import TipoDocumento
 from ..ocr import imagenes, motor
 
-# Orden importante: la factura también dice "AUTORIZACIÓN:", por eso se revisa primero.
-REGLAS = [
-    ("FEV", ("FACTURA ELECTRONICA DE VENTA", "CUFE")),
-    ("HEV", ("HISTORIA CLINICA", "TIPO Y NUMERO DE IDENTIFICACION", "NOTAS MEDICAS")),
-    ("PDE", ("AUTORIZACION", "AUTORIZADOS", "AMBULATORI", "PORTAL SALUD", "CASO NRO")),
-]
 
-
-def _texto_pagina(doc: pymupdf.Document, i: int, ruta: Path) -> str:
+def _texto_pagina(doc: pymupdf.Document, i: int, ruta: Path, ocr: bool = True) -> str:
     texto = doc[i].get_text()
-    if len(texto.strip()) >= 50:
+    if len(texto.strip()) >= 50 or not ocr:
         return texto
     imgs = [im for im in imagenes.extraer(ruta, max_paginas=i + 1) if im.pagina == i + 1]
     if not imgs:
@@ -39,10 +36,22 @@ def clasificar_paginas(ruta: Path) -> list[str]:
     clases: list[str] = []
     with pymupdf.open(ruta) as doc:
         for i in range(len(doc)):
-            t = normalize.texto(_texto_pagina(doc, i, ruta)) or ""
-            clase = next((c for c, claves in REGLAS if any(k in t for k in claves)), None)
-            clases.append(clase or (clases[-1] if clases else "OTRO"))
+            tipo = catalogo.get().clasificar(_texto_pagina(doc, i, ruta))
+            clases.append(tipo.prefijo if tipo else (clases[-1] if clases else "OTRO"))
     return clases
+
+
+def texto_primera_pagina(ruta: Path, ocr: bool = False) -> str:
+    """Texto de la primera página (con OCR solo si se pide y la página no tiene texto digital)."""
+    try:
+        with pymupdf.open(ruta) as doc:
+            return _texto_pagina(doc, 0, ruta, ocr) if len(doc) else ""
+    except Exception:  # PDF dañado: lo reporta el lector del documento
+        return ""
+
+
+def tipo_por_contenido(ruta: Path, ocr: bool = False) -> TipoDocumento | None:
+    return catalogo.get().clasificar(texto_primera_pagina(ruta, ocr))
 
 
 def _rangos(paginas: list[int]) -> str:

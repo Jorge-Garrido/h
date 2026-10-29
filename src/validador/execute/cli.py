@@ -5,6 +5,7 @@
     validador config borrador cambios.toml --hospital 800000001 --eps 900156264 --desde 2027-02-01
     validador config simular 7 "nuevaeps/NUEVA EPS EXITOSA"
     validador config publicar 7
+    validador catalogo ver --clasificar "EPC_800000001_FE123.pdf"
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .. import __version__, pipeline, reglas, report, salida_errores, simulacion
+from .. import __version__, catalogo, pipeline, reglas, report, salida_errores, simulacion
 from ..base.config import CLAVES_INFRA, ResolutorConfig, get_config
 from ..base.motivos import MOTIVOS
-from ..ingest import discover
+from ..data_preprocessing import normalize
+from ..ingest import discover, unificado
 from ..store import db
 from ..tarifario import importer
 
@@ -229,6 +231,36 @@ def _reglas_listar(args: argparse.Namespace) -> int:
     return 0
 
 
+def _catalogo_ver(args: argparse.Namespace) -> int:
+    """Documentos del catálogo con los ajustes de la configuración activa; con --clasificar, qué
+    documento y qué formato se reconocen en un PDF (solo imprime nombres, no su contenido)."""
+    cat, cfg = catalogo.get(), get_config()
+    if args.clasificar:
+        texto = normalize.texto(unificado.texto_primera_pagina(Path(args.clasificar), ocr=args.ocr)) or ""
+        tipo = cat.clasificar(texto)
+        if tipo is None:
+            print("No se reconoce: sería DOC.DESCONOCIDO (solo verifica la identidad del paciente).")
+            return 1
+        ajuste = cfg.documentos.get(tipo.prefijo)
+        formato = tipo.formato(texto, ajuste.formatos if ajuste else [])
+        print(f"{tipo.prefijo} ({tipo.nombre}); formato: {formato.nombre if formato else 'genérico (sin formato propio)'}")
+        return 0
+    alias = cfg.alias_documentos()
+    for t in cat.documentos.values():
+        propios = [a for a, p in alias.items() if p == t.prefijo]
+        print(f"{t.prefijo:5} {t.nombre}  [lector {t.lector}{', no vota' if not t.vota else ''}]"
+              + (f"  alias: {', '.join(propios)}" if propios else ""))
+        if t.campos:
+            print(f"      campos: {', '.join(t.campos)}")
+        ajuste = cfg.documentos.get(t.prefijo)
+        formatos = [f.nombre for f in (ajuste.formatos if ajuste else [])] + [f"{f.nombre} (catálogo)" for f in t.formatos]
+        if formatos:
+            print(f"      formatos: {', '.join(formatos)}")
+        if ajuste and ajuste.etiquetas:
+            print(f"      etiquetas del hospital: {ajuste.etiquetas}")
+    return 0
+
+
 def _imprimir_discrepancias(resultados) -> None:
     filas = [(r.factura, d) for r in resultados for d in salida_errores.discrepancias(r)]
     if not filas:
@@ -237,7 +269,7 @@ def _imprimir_discrepancias(resultados) -> None:
     print("\nCAMPOS CON DISCREPANCIA")
     for factura, d in filas:
         valores = "  ".join(
-            f"{salida_errores.NOMBRE_FUENTE.get(k, k)}={v}{' (!)' if k in d['sospechosos'] else ''}" for k, v in d["valores"].items()
+            f"{salida_errores.nombre_fuente(k)}={v}{' (!)' if k in d['sospechosos'] else ''}" for k, v in d["valores"].items()
         )
         print(f"  {factura}  {d['severidad'].upper():5}  {d['campo'][:40]:40}  {valores}")
         if d["motivo"] and (d["tipo"] != "Campo" or not valores):
@@ -275,6 +307,14 @@ def main(argv: list[str] | None = None) -> int:
     rg.add_parser("listar", help="códigos, severidad por defecto y ajustes de la configuración (VALIDADOR_CONFIG)").set_defaults(
         func=_reglas_listar
     )
+
+    ct = sub.add_parser("catalogo", help="documentos, fuentes y campos (catalogo/catalogo.toml)").add_subparsers(
+        dest="accion", required=True
+    )
+    cv = ct.add_parser("ver", help="documentos del catálogo con los ajustes de la configuración (VALIDADOR_CONFIG)")
+    cv.add_argument("--clasificar", metavar="PDF", help="dice qué documento y qué formato se reconocen en un PDF")
+    cv.add_argument("--ocr", action="store_true", help="con --clasificar: lee con OCR si la primera página es imagen")
+    cv.set_defaults(func=_catalogo_ver)
 
     c = sub.add_parser("config", help="capas de configuración en la base de datos").add_subparsers(dest="accion", required=True)
     b = c.add_parser("borrador", help="valida un TOML con las claves que cambian y lo guarda como borrador")

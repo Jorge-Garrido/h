@@ -19,43 +19,18 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
+from . import catalogo
 from .data_preprocessing import normalize
 from .compare import levenshtein
 from .data_preprocessing.layout import DocLayout, Fila, Palabra
 
 TipoCampo = Literal["codigo", "documento", "nombre", "dinero", "fecha"]
 
-TIPOS: dict[str, TipoCampo] = {
-    "numero_factura": "codigo",
-    "cufe": "codigo",
-    "nit_emisor": "codigo",
-    "nit_eps": "codigo",
-    "paciente_id": "documento",
-    "paciente_nombre": "nombre",
-    "numero_autorizacion": "codigo",
-    "id_interno_paciente": "codigo",
-    "valor_total": "dinero",
-    "fecha_ingreso": "fecha",
-    "fecha_egreso": "fecha",
-    "cups": "codigo",
-}
-
-# Diccionario genérico: sinónimos habituales en documentos de salud en Colombia.
-# No describe ninguna plantilla en particular.
-ETIQUETAS: dict[str, list[str]] = {
-    "numero_factura": ["FACTURA ELECTRONICA DE VENTA", "NUMERO DE FACTURA", "FACTURA", "NO"],
-    "cufe": ["CUFE"],
-    "nit_emisor": ["NIT"],
-    "nit_eps": ["NIT/ID", "NIT"],
-    "paciente_id": ["TIPO Y NUMERO DE IDENTIFICACION", "IDENTIFICACION", "DOCUMENTO DE IDENTIDAD", "CEDULA", "N° DOCUMENTO", "NUMERO DE DOCUMENTO", "AFILIADO", "ID", "NOMBRE"],
-    "paciente_nombre": ["NOMBRE DEL PACIENTE", "PACIENTE", "NOMBRES", "NOMBRE", "USUARIO", "AFILIADO"],
-    "numero_autorizacion": ["NUMERO DE AUTORIZACION", "NO AUTORIZACION", "CONSULTAR AMBULATORIO", "AUTORIZACION", "AUT"],
-    "id_interno_paciente": ["IDENTIFICADOR UNICO", "CONSECUTIVO INTERNO", "HISTORIA CLINICA"],
-    "valor_total": ["TOTAL A PAGAR", "VALOR TOTAL", "TOTAL"],
-    "fecha_ingreso": ["FECHA DE INGRESO", "FECHA INGRESO"],
-    "fecha_egreso": ["FECHA DE EGRESO", "FECHA EGRESO"],
-    "cups": ["CODIGO CUPS", "SERVICIOS AUTORIZADOS", "PROCEDIMIENTOS AUTORIZADOS", "CUPS", "CODIGO", "COD"],
-}
+# Tipo y diccionario genérico de etiquetas (sinónimos habituales en documentos de salud en
+# Colombia) de cada campo: vienen del catálogo (catalogo/catalogo.toml). No describen ninguna
+# plantilla en particular; las de un formato o un hospital llegan en ``extra``.
+TIPOS: dict[str, TipoCampo] = {n: c.tipo for n, c in catalogo.get().campos.items()}
+ETIQUETAS: dict[str, list[str]] = {n: list(c.etiquetas) for n, c in catalogo.get().campos.items()}
 
 # Cercanía aceptada entre la etiqueta y el valor (puntos PDF).
 MAX_DISTANCIA_H = 300
@@ -108,10 +83,11 @@ def _piezas_etiqueta(p: Palabra) -> list[str]:
     return [x for x in re.split(r"[:.]", t) if x]
 
 
-def anclas(doc: DocLayout, campo: str) -> list[Ancla]:
-    """Todas las apariciones de las etiquetas del campo, más específicas primero."""
+def anclas(doc: DocLayout, campo: str, extra: list[str] = ()) -> list[Ancla]:
+    """Todas las apariciones de las etiquetas del campo, más específicas primero. ``extra`` son
+    las etiquetas del formato o del hospital: van antes que las genéricas del catálogo."""
     resultado: list[Ancla] = []
-    lista = ETIQUETAS.get(campo, [])
+    lista = list(dict.fromkeys([*extra, *ETIQUETAS.get(campo, [])]))
     for etiqueta in sorted(lista, key=lambda e: -len(e)):
         objetivo = etiqueta.split()
         for fila in doc.filas:
@@ -236,9 +212,9 @@ def _resultado(campo: str, estado: Estado, cand: _Candidato | None, ancla: Ancla
 # --- verificación --------------------------------------------------------------
 
 
-def verificar(doc: DocLayout, campo: str, esperado: str) -> Verificacion:
+def verificar(doc: DocLayout, campo: str, esperado: str, extra: list[str] = ()) -> Verificacion:
     tipo = TIPOS[campo]
-    anc = anclas(doc, campo)
+    anc = anclas(doc, campo, extra)
     if tipo in ("codigo", "documento"):
         return _verificar_codigo(doc, campo, esperado, anc)
     if tipo == "nombre":
@@ -432,15 +408,15 @@ def _vecinos(doc: DocLayout, a: Ancla) -> list[Palabra]:
     return []
 
 
-def extraer(doc: DocLayout, campo: str) -> str | None:
+def extraer(doc: DocLayout, campo: str, extra: list[str] = ()) -> str | None:
     tipo = TIPOS[campo]
-    todas = anclas(doc, campo)
+    todas = anclas(doc, campo, extra)
     # Primero la etiqueta más específica del diccionario; luego el orden de lectura.
     for a in sorted(todas, key=lambda a: (a.rango, a.fila)):
         pegado = [x for x in _piezas_etiqueta(a.palabras[-1]) if x != a.texto.split()[-1]]
         palabras = _vecinos(doc, a)
         if tipo == "codigo":
-            patron = _PATRONES_CODIGO[campo]
+            patron = _PATRONES_CODIGO.get(campo, r"[0-9A-Z]*\d[0-9A-Z]{2,}")
             textos = pegado + [x for p in palabras for x in re.split(r"[-:/;,.\s]", p.texto) if x]
             if campo.startswith("nit"):
                 textos = [p.texto for p in palabras]

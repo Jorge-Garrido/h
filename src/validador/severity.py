@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 
+from . import catalogo
 from .attribution import votar
 from .compare import distancia_digitos, iguales
 from .base.config import Config, Severidad
 from .base.schemas import CampoExtraido, ResultadoCampo
 
 ORDEN: dict[str, int] = {"ok": 0, "info": 1, "aviso": 2, "grave": 3}
-FUENTES_OCR = {"autorizacion_scan"}
+FUENTES_OCR = catalogo.get().fuentes_ocr()  # fuentes con ocr = true en el catálogo
 
 
 def peor(*resultados: Severidad) -> Severidad:

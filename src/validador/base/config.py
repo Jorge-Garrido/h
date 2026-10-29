@@ -14,15 +14,18 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from datetime import date
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .. import catalogo
+from ..catalogo import Formato
 from . import motivos
 
 Severidad = Literal["ok", "info", "aviso", "grave"]
@@ -70,6 +73,13 @@ class ReglaDocumentos(Estricto):
     # El XML no va aquí: sin XML ni RIPS no hay fuente estructurada y siempre es grave.
     documentos: dict[str, Severidad]
 
+    @field_validator("documentos")
+    @classmethod
+    def _documentos_del_catalogo(cls, v: dict[str, Severidad]) -> dict[str, Severidad]:
+        if desconocidos := [d for d in v if d not in catalogo.get().documentos]:
+            raise ValueError(f"documentos que no están en el catálogo: {', '.join(desconocidos)}")
+        return v
+
     def aplica(self, eps: str | None, servicios: set[str]) -> bool:
         return ("*" in self.eps or eps in self.eps) and ("*" in self.servicios or bool(servicios & set(self.servicios)))
 
@@ -82,6 +92,61 @@ class AjusteRegla(Estricto):
     activa: bool = True
     # None = la severidad que decide la regla (p. ej. la de la matriz de documentos).
     severidad: Severidad | None = None
+
+
+class AjusteDocumento(Estricto):
+    """Lo que cambia de un documento del catálogo en un hospital o EPS (capas de configuración)."""
+
+    # Prefijos con que este hospital nombra el documento: {"EPI": {alias = ["EPC"]}}.
+    alias: list[str] = []
+    # Etiquetas extra por campo, además de las del catálogo (van primero).
+    etiquetas: dict[str, list[str]] = {}
+    # Formatos del sistema de este hospital (se prueban antes que los del catálogo).
+    formatos: list[Formato] = []
+
+    @field_validator("alias")
+    @classmethod
+    def _alias(cls, v: list[str]) -> list[str]:
+        v = [a.upper() for a in v]
+        if malos := [a for a in v if not re.fullmatch(r"[A-Z]{3}", a)]:
+            raise ValueError(f"un prefijo son tres letras (ARCHIVO: XXX_<NIT>_<FACTURA>.pdf): {', '.join(malos)}")
+        return v
+
+
+Nombre = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{2,40}$")]
+
+
+class PlantillaCampoRequerido(Estricto):
+    """El campo debe poder leerse en el documento (si el documento está en la carpeta)."""
+
+    usar: Literal["campo_requerido"]
+    nombre: Nombre  # va como ref del hallazgo: sin datos del paciente
+    campo: str
+    documentos: list[str] = Field(min_length=1)
+    severidad: Severidad = "aviso"
+
+
+class PlantillaValorPermitido(Estricto):
+    """El valor final del campo debe estar en la lista o cumplir el patrón (p. ej. NIT de EPS con contrato)."""
+
+    usar: Literal["valor_permitido"]
+    nombre: Nombre
+    campo: str
+    valores: list[str] = []
+    patron: str | None = None
+    severidad: Severidad = "aviso"
+
+    @model_validator(mode="after")
+    def _valores_o_patron(self) -> PlantillaValorPermitido:
+        if not self.valores and not self.patron:
+            raise ValueError(f"plantilla {self.nombre}: falta 'valores' o 'patron'")
+        if self.patron:
+            re.compile(self.patron)
+        return self
+
+
+# La lógica de cada plantilla está en reglas/plantillas.py; aquí solo sus parámetros.
+Plantilla = Annotated[PlantillaCampoRequerido | PlantillaValorPermitido, Field(discriminator="usar")]
 
 
 class Config(Estricto):
@@ -156,6 +221,14 @@ class Config(Estricto):
     # ``validador reglas listar`` muestra los códigos y sus severidades por defecto.
     reglas: dict[str, AjusteRegla] = {}
 
+    # Ajustes por documento del catálogo (catalogo/catalogo.toml) para este hospital o EPS:
+    # alias de prefijos, etiquetas extra y formatos de su sistema.
+    documentos: dict[str, AjusteDocumento] = {}
+
+    # Validaciones parametrizadas (reglas/plantillas.py): la lógica está en código y probada;
+    # cada uso solo trae datos. Una capa que trae ``plantillas`` define la lista completa.
+    plantillas: list[Plantilla] = []
+
     # Campos de los PDF digitales: "generica" (localizador por posiciones + diccionario de
     # etiquetas, sin plantillas) o "plantilla" (parsers específicos de este hospital).
     extraccion_pdf: Literal["generica", "plantilla"] = "generica"
@@ -182,6 +255,54 @@ class Config(Estricto):
             if codigo.startswith("CAMPO."):
                 raise ValueError(f"{codigo}: los campos se ajustan en 'campos' (si_difiere, si_falta_en_todas)")
         return v
+
+    @field_validator("prioridad_fuentes")
+    @classmethod
+    def _fuentes_del_catalogo(cls, v: list[str]) -> list[str]:
+        if desconocidas := [f for f in v if f not in catalogo.get().fuentes]:
+            raise ValueError(f"fuentes que no están en el catálogo: {', '.join(desconocidas)}")
+        return v
+
+    @field_validator("documentos")
+    @classmethod
+    def _ajustes_de_documentos(cls, v: dict[str, AjusteDocumento]) -> dict[str, AjusteDocumento]:
+        cat, errores, alias = catalogo.get(), [], {}
+        for prefijo, ajuste in v.items():
+            if prefijo not in cat.documentos:
+                errores.append(f"'{prefijo}' no está en el catálogo de documentos")
+                continue
+            for campo in [*ajuste.etiquetas, *(c for f in ajuste.formatos for c in f.etiquetas)]:
+                if campo not in cat.campos:
+                    errores.append(f"{prefijo}: el campo '{campo}' no está en el catálogo")
+            for a in ajuste.alias:
+                if (otro := cat.documento(a)) is not None and otro.prefijo != prefijo:
+                    errores.append(f"{prefijo}: el alias {a} ya es {otro.prefijo} en el catálogo")
+                if a in alias and alias[a] != prefijo:
+                    errores.append(f"el alias {a} está en {alias[a]} y en {prefijo}")
+                alias[a] = prefijo
+        if errores:
+            raise ValueError("; ".join(errores))
+        return v
+
+    @field_validator("plantillas")
+    @classmethod
+    def _plantillas(cls, v: list) -> list:
+        cat, errores = catalogo.get(), []
+        nombres = [p.nombre for p in v]
+        errores += [f"plantilla '{n}' repetida" for n in sorted({n for n in nombres if nombres.count(n) > 1})]
+        for p in v:
+            if p.campo not in cat.campos:
+                errores.append(f"plantilla {p.nombre}: el campo '{p.campo}' no está en el catálogo")
+            for d in getattr(p, "documentos", []):
+                if d not in cat.documentos:
+                    errores.append(f"plantilla {p.nombre}: el documento '{d}' no está en el catálogo")
+        if errores:
+            raise ValueError("; ".join(errores))
+        return v
+
+    def alias_documentos(self) -> dict[str, str]:
+        """Alias de prefijos del catálogo más los de este hospital: {"FVS": "FEV", "EPC": "EPI"}."""
+        return catalogo.get().alias() | {a: p for p, aj in self.documentos.items() for a in aj.alias}
 
     def regla_documentos(self, eps: str | None, servicios: set[str]) -> ReglaDocumentos | None:
         """La regla de documentos mínimos más específica que aplica a la factura."""

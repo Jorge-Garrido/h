@@ -33,6 +33,33 @@ activa = false
 [reglas."LINEA.CANTIDAD_DIFIERE"]
 severidad = "grave"
 
+# --- Documentos del catálogo en este hospital (ver: validador catalogo ver) -----------------
+# El catálogo (src/validador/catalogo/catalogo.toml) dice qué es una epicrisis; aquí va cómo la
+# nombra y la imprime el sistema de ESTE hospital. Sistema y textos ficticios: reemplazar.
+[documentos.EPI]
+alias = ["EPC"]                        # sus archivos se llaman EPC_<NIT>_<FACTURA>.pdf
+
+[[documentos.EPI.formatos]]
+nombre = "his-hospital-ejemplo"
+detectar = ["SISTEMA B", "RESUMEN DE EGRESO"]   # textos de la primera página que identifican su formato
+etiquetas = { paciente_id = ["IDENT USUARIO"], fecha_egreso = ["FECHA SALIDA"] }
+
+# --- Plantillas de regla (ver reglas/plantillas.py) --------------------------------------
+# La lógica está en código; aquí solo los parámetros. "nombre" va en los reportes y en la base.
+[[plantillas]]
+usar = "campo_requerido"
+nombre = "egreso-en-epicrisis"
+campo = "fecha_egreso"
+documentos = ["EPI"]
+severidad = "aviso"
+
+[[plantillas]]
+usar = "valor_permitido"
+nombre = "eps-con-contrato"             # NIT ficticio: reemplazar por los de las EPS con contrato
+campo = "nit_eps"
+valores = ["900000002"]
+severidad = "grave"
+
 # --- Códigos DIAN / CUV ------------------------------------------------------------------
 [codigos_recurrentes]
 FAJ43b = "info"
